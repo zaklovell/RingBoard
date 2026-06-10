@@ -1,0 +1,10 @@
+#pragma once
+#include "models.h"
+
+void ouraInit();
+// Fetches readiness, sleep score, sleep phases, and activity. Returns true if
+// at least one section came back; flags inside `out` say which.
+bool ouraFetchAll(OuraData *out);
+int ouraCallsToday();
+// "ok", "auth" (re-run tools/oura_auth.py), or "net" for the web API.
+const char *ouraAuthState();

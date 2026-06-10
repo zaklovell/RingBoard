@@ -5,10 +5,38 @@ repository.
 
 ## What this is
 
-A display project for a CYD board (ESP32-2432S028R, the "Cheap Yellow Display").
-Project name suggests Oura ring data on the little screen; confirm scope with Zak at
-kickoff before scaffolding. Nothing is built yet, but the hardware knowledge below was
-earned on an identical board (Zak owns two from the same 2-pack) and is all verified.
+**RingBoard**: Oura ring stats on a CYD board (ESP32-2432S028R, the "Cheap Yellow
+Display"). Shows readiness + sleep scores, sleep stage breakdown, and activity
+(steps, distance, calories, inactive time). Built and compiling; not yet flashed.
+The hardware knowledge below was earned on an identical board (Zak owns two from
+the same 2-pack) and is all verified.
+
+The project was renamed from OuraCYD to RingBoard because the Oura API Agreement
+(section 6(e)) forbids "Oura" in the app name. The registered Oura app, the GitHub
+repo (github.com/zaklovell/RingBoard), and the Pages site all say RingBoard; only
+this local folder still carries the old name.
+
+## Project state and decisions
+
+- `src/` firmware mirrors the planes project structure: config.h, models.h,
+  oura.cpp (OAuth + filtered fetches), ui.cpp (three-band sprite UI, Oura dark
+  theme), webapi.cpp (HA API at `ringboard.local`), main.cpp.
+- `tools/oura_auth.py`: one-time browser OAuth dance; writes the refresh token
+  into `src/secrets.h`. Redirect URI is `http://localhost:8080/callback`.
+- Token lifecycle: Oura rotates refresh tokens, so the firmware persists the
+  current one in NVS (`Preferences`, namespace "ringboard", key "rtok"); the
+  compiled secrets.h value is only a first-boot seed.
+- `OURA_USE_SANDBOX` in config.h is 1 by default: hits `/v2/sandbox/*` (fake
+  data, no auth). **Compliance rule: keep sandbox on while developing with
+  Claude.** The Oura API Agreement (4(d)) forbids feeding real API data to any
+  AI model, so Zak's real responses must never land in a Claude conversation.
+  Zak flips it to 0 himself for real data.
+- OAuth scopes: daily, heartrate, workout, spo2Daily.
+- GitHub Pages (privacy policy + ToS, required by the Oura app form) serves
+  from `/docs` on main. Attorney-approved; don't edit without flagging.
+- **The connected board `/dev/cu.usbserial-2130` is the PLANES board. Never
+  flash it from this project.** RingBoard's CYD will get its own device number.
+- API budget: 4 calls per refresh, 10 min cadence, 600/day cap in config.h.
 
 A fully working sibling project lives at `~/GitHub/planes/esp32/PlaneBoardDisplay/`
 (a live plane tracker on the other board). When in doubt, copy patterns from there: it
