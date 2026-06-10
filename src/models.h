@@ -1,5 +1,6 @@
 #pragma once
 #include <stdint.h>
+#include <time.h>
 
 enum { ST_OK = 0, ST_STALE = 1, ST_ERROR = 2 };
 
@@ -30,5 +31,6 @@ struct OuraData {
 
 struct BoardView {
     uint8_t status = ST_ERROR;
+    time_t updatedAt = 0;  // wall clock of the last good fetch
     OuraData d;
 };

@@ -68,6 +68,7 @@ static void publishWebStatus() {
     s.readiness = view.d.haveReadiness ? view.d.readinessScore : 0;
     s.sleep = view.d.haveSleep ? view.d.sleepScore : 0;
     s.steps = view.d.haveActivity ? view.d.steps : 0;
+    s.updatedAt = (long)view.updatedAt;
     webApiSetStatus(s);
 }
 
@@ -84,6 +85,7 @@ static void refreshBoard() {
         return;
     }
     view.d = d;
+    view.updatedAt = time(nullptr);
     lastGoodFetch = millis();
     haveData = true;
     Serial.printf(

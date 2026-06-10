@@ -24,15 +24,17 @@ static const char *modeName() {
 }
 
 static void handleStatus() {
-    char body[280];
+    long age = status.updatedAt > 0 ? (long)time(nullptr) - status.updatedAt : -1;
+    char body[320];
     snprintf(body, sizeof(body),
              "{\"screen\":\"%s\",\"screen_on\":%s,\"have_data\":%s,"
              "\"readiness\":%d,\"sleep\":%d,\"steps\":%ld,"
+             "\"updated_at\":%ld,\"age_sec\":%ld,"
              "\"auth\":\"%s\",\"oura_calls_today\":%d,\"free_heap\":%u}",
              modeName(), status.screenOn ? "true" : "false",
              status.haveData ? "true" : "false", status.readiness,
-             status.sleep, (long)status.steps, ouraAuthState(),
-             ouraCallsToday(), (unsigned)ESP.getFreeHeap());
+             status.sleep, (long)status.steps, status.updatedAt, age,
+             ouraAuthState(), ouraCallsToday(), (unsigned)ESP.getFreeHeap());
     server.send(200, "application/json", body);
 }
 

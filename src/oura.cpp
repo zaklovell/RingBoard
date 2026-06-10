@@ -132,9 +132,14 @@ static bool ensureToken() {
 
 // Local dates for the query window: a few days back so the latest documents
 // are always in range even right after midnight or before the morning sync.
+// The window ends tomorrow, not today: Oura computes days in the app's
+// timezone (which may differ from this board's TZ) and end_date isn't
+// documented as inclusive, so pad a day. Future days just return nothing.
 static bool dateRange(char *startD, size_t sn, char *endD, size_t en) {
     struct tm t;
     if (!getLocalTime(&t, 100)) return false;
+    time_t fwd = time(nullptr) + 86400;
+    localtime_r(&fwd, &t);
     strftime(endD, en, "%Y-%m-%d", &t);
     time_t back = time(nullptr) - 3 * 86400;
     localtime_r(&back, &t);
@@ -199,7 +204,7 @@ static bool ouraGet(const char *endpoint, const char *startD, const char *endD,
     return true;
 }
 
-// The data array comes back in ascending day order; the last entry wins.
+// Pick the newest day explicitly; array order isn't documented.
 static bool fetchScore(const char *endpoint, const char *startD,
                        const char *endD, int *score) {
     JsonDocument filter;
@@ -207,11 +212,17 @@ static bool fetchScore(const char *endpoint, const char *startD,
     filter["data"][0]["day"] = true;
     JsonDocument doc;
     if (!ouraGet(endpoint, startD, endD, filter, &doc)) return false;
-    JsonArray data = doc["data"].as<JsonArray>();
-    if (data.size() == 0) return false;
-    JsonObject last = data[data.size() - 1];
-    *score = last["score"] | 0;
-    return *score > 0;
+    const char *bestDay = "";
+    int best = 0;
+    for (JsonObject o : doc["data"].as<JsonArray>()) {
+        const char *day = o["day"] | "";
+        if (day[0] && strcmp(day, bestDay) >= 0) {
+            bestDay = day;
+            best = o["score"] | 0;
+        }
+    }
+    *score = best;
+    return best > 0;
 }
 
 // Long-sleep document with the biggest total wins; naps lose.
@@ -229,17 +240,26 @@ static bool fetchSleepDetail(const char *startD, const char *endD,
     JsonDocument doc;
     if (!ouraGet("sleep", startD, endD, filter, &doc)) return false;
 
+    // Newest day wins; on a tie prefer long_sleep over an unscored "sleep"
+    // period, then the longest. Naps ("late_nap", "rest") never qualify.
     const char *bestDay = "";
+    bool bestLong = false;
     int32_t bestTotal = -1;
     JsonObject best;
     for (JsonObject s : doc["data"].as<JsonArray>()) {
         const char *day = s["day"] | "";
         const char *type = s["type"] | "";
         int32_t total = s["total_sleep_duration"] | 0;
-        if (strcmp(type, "long_sleep") != 0) continue;
+        bool isLong = strcmp(type, "long_sleep") == 0;
+        if (!day[0] || (!isLong && strcmp(type, "sleep") != 0)) continue;
         int cmp = strcmp(day, bestDay);
-        if (cmp > 0 || (cmp == 0 && total > bestTotal)) {
+        bool better = cmp > 0;
+        if (cmp == 0) {
+            better = (isLong != bestLong) ? isLong : total > bestTotal;
+        }
+        if (better) {
             bestDay = day;
+            bestLong = isLong;
             bestTotal = total;
             best = s;
         }
@@ -266,15 +286,24 @@ static bool fetchActivity(const char *startD, const char *endD,
     f["sedentary_time"] = true;
     JsonDocument doc;
     if (!ouraGet("daily_activity", startD, endD, filter, &doc)) return false;
-    JsonArray data = doc["data"].as<JsonArray>();
-    if (data.size() == 0) return false;
-    JsonObject last = data[data.size() - 1];
-    out->activityScore = last["score"] | 0;
-    out->steps = last["steps"] | 0;
-    out->distanceM = last["equivalent_walking_distance"] | 0;
-    out->activeCal = last["active_calories"] | 0;
-    out->totalCal = last["total_calories"] | 0;
-    out->sedentarySec = last["sedentary_time"] | 0;
+    const char *bestDay = "";
+    JsonObject best;
+    bool found = false;
+    for (JsonObject o : doc["data"].as<JsonArray>()) {
+        const char *day = o["day"] | "";
+        if (day[0] && strcmp(day, bestDay) >= 0) {
+            bestDay = day;
+            best = o;
+            found = true;
+        }
+    }
+    if (!found) return false;
+    out->activityScore = best["score"] | 0;
+    out->steps = best["steps"] | 0;
+    out->distanceM = best["equivalent_walking_distance"] | 0;
+    out->activeCal = best["active_calories"] | 0;
+    out->totalCal = best["total_calories"] | 0;
+    out->sedentarySec = best["sedentary_time"] | 0;
     return true;
 }
 

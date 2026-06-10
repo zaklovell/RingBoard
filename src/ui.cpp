@@ -96,37 +96,47 @@ static void fmtClock(int32_t sec, char *out, size_t n) {
     snprintf(out, n, "%ld:%02ld", (long)(sec / 3600), (long)((sec % 3600) / 60));
 }
 
-// One half of band A: small-caps label, big colored score, qualifier word.
-static void drawScore(int x, const char *label, bool have, int score) {
-    spr->setTextDatum(TL_DATUM);
-    spr->setTextFont(2);
-    spr->setTextColor(COL_SUB, COL_BG);
-    spr->drawString(label, x, 8);
+// Oura-style score ring: progress arc from 12 o'clock (TFT_eSPI puts 0
+// degrees at 6 o'clock, so the top is 180), score inside, label below.
+static void drawRing(int cx, const char *label, bool have, int score) {
+    const int cy = 34, r = 27, ir = 22;
+    spr->drawSmoothArc(cx, cy, r, ir, 0, 360, COL_LINE, COL_BG, false);
     if (have) {
+        int sweep = score * 360 / 100;
+        if (sweep > 360) sweep = 360;
+        if (sweep < 8) sweep = 8;
+        uint16_t c = scoreColor(score);
+        if (180 + sweep <= 360) {
+            spr->drawSmoothArc(cx, cy, r, ir, 180, 180 + sweep, c, COL_BG, true);
+        } else {
+            spr->drawSmoothArc(cx, cy, r, ir, 180, 360, c, COL_BG, true);
+            spr->drawSmoothArc(cx, cy, r, ir, 0, sweep - 180, c, COL_BG, true);
+        }
         char num[8];
         snprintf(num, sizeof(num), "%d", score);
-        spr->setTextDatum(ML_DATUM);
-        spr->setFreeFont(&FreeSansBold24pt7b);
-        spr->setTextColor(scoreColor(score), COL_BG);
-        spr->drawString(num, x, 48);
-        int nx = x + spr->textWidth(num) + 10;
-        spr->setTextFont(2);
-        spr->setTextColor(COL_SUB, COL_BG);
-        spr->drawString(scoreWord(score), nx, 54);
+        spr->setTextDatum(MC_DATUM);
+        spr->setFreeFont(&FreeSansBold12pt7b);
+        spr->setTextColor(COL_TEXT, COL_BG);
+        spr->drawString(num, cx, cy + 1);
     } else {
-        spr->setTextDatum(ML_DATUM);
-        spr->setFreeFont(&FreeSans12pt7b);
+        spr->setTextDatum(MC_DATUM);
+        spr->setFreeFont(&FreeSans9pt7b);
         spr->setTextColor(COL_SUB, COL_BG);
-        spr->drawString("--", x, 48);
+        spr->drawString("--", cx, cy + 1);
     }
+    spr->setTextFont(2);
+    spr->setTextDatum(TC_DATUM);
+    spr->setTextColor(COL_SUB, COL_BG);
+    spr->drawString(label, cx, 64);
 }
 
 static void drawBandA(const BoardView &v) {
     bandStart();
     statusDot(v.status);
-    drawScore(18, "READINESS", v.d.haveReadiness, v.d.readinessScore);
-    spr->drawFastVLine(160, 12, 58, COL_LINE);
-    drawScore(178, "SLEEP", v.d.haveSleep, v.d.sleepScore);
+    drawRing(64, "READINESS", v.d.haveReadiness, v.d.readinessScore);
+    drawRing(160, "SLEEP", v.d.haveSleep, v.d.sleepScore);
+    drawRing(256, "ACTIVITY", v.d.haveActivity && v.d.activityScore > 0,
+             v.d.activityScore);
     bandPush(0);
 }
 
@@ -171,6 +181,7 @@ static void drawStageBar(const OuraData &d) {
 
 static void drawBandB(const BoardView &v) {
     bandStart();
+    spr->drawFastHLine(12, 0, W - 24, COL_LINE);
     spr->setTextDatum(TL_DATUM);
     spr->setTextFont(2);
     spr->setTextColor(COL_SUB, COL_BG);
@@ -192,12 +203,35 @@ static void drawBandB(const BoardView &v) {
     bandPush(80);
 }
 
+// "11:42 PM" from the wall clock of the last good fetch.
+static void fmtUpdated(time_t ts, char *out, size_t n) {
+    if (ts == 0) {
+        out[0] = '\0';
+        return;
+    }
+    struct tm t;
+    localtime_r(&ts, &t);
+    int h = t.tm_hour % 12;
+    if (h == 0) h = 12;
+    snprintf(out, n, "%d:%02d %s", h, t.tm_min, t.tm_hour < 12 ? "AM" : "PM");
+}
+
 static void drawBandC(const BoardView &v) {
     bandStart();
+    spr->drawFastHLine(12, 0, W - 24, COL_LINE);
     spr->setTextDatum(TL_DATUM);
     spr->setTextFont(2);
     spr->setTextColor(COL_SUB, COL_BG);
     spr->drawString("ACTIVITY", 18, 2);
+
+    char upd[24], stamp[32];
+    fmtUpdated(v.updatedAt, upd, sizeof(upd));
+    if (upd[0]) {
+        snprintf(stamp, sizeof(stamp), "updated %s", upd);
+        spr->setTextDatum(TR_DATUM);
+        spr->drawString(stamp, 302, 2);
+        spr->setTextDatum(TL_DATUM);
+    }
     if (!v.d.haveActivity) {
         spr->setTextDatum(ML_DATUM);
         spr->setFreeFont(&FreeSans12pt7b);
@@ -205,15 +239,6 @@ static void drawBandC(const BoardView &v) {
         spr->drawString("No activity data yet", 18, 44);
         bandPush(160);
         return;
-    }
-
-    if (v.d.activityScore > 0) {
-        char num[8];
-        snprintf(num, sizeof(num), "%d", v.d.activityScore);
-        spr->setTextDatum(TR_DATUM);
-        spr->setFreeFont(&FreeSansBold9pt7b);
-        spr->setTextColor(scoreColor(v.d.activityScore), COL_BG);
-        spr->drawString(num, 302, 2);
     }
 
     char steps[16], buf[40];
