@@ -100,7 +100,10 @@ static bool screenShouldBeOn() {
     if (screenMode() == SCREEN_FORCED_OFF) return false;
     struct tm t;
     if (!getLocalTime(&t, 10)) return true;  // no clock yet: stay on
-    bool night = t.tm_hour >= SLEEP_START_HOUR || t.tm_hour < SLEEP_END_HOUR;
+    // The off-window may wrap midnight (23..6) or not (0..7).
+    bool night = SLEEP_START_HOUR > SLEEP_END_HOUR
+                     ? (t.tm_hour >= SLEEP_START_HOUR || t.tm_hour < SLEEP_END_HOUR)
+                     : (t.tm_hour >= SLEEP_START_HOUR && t.tm_hour < SLEEP_END_HOUR);
     return !night;
 }
 

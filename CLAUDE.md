@@ -26,11 +26,13 @@ this local folder still carries the old name.
 - Token lifecycle: Oura rotates refresh tokens, so the firmware persists the
   current one in NVS (`Preferences`, namespace "ringboard", key "rtok"); the
   compiled secrets.h value is only a first-boot seed.
-- `OURA_USE_SANDBOX` in config.h is 1 by default: hits `/v2/sandbox/*` (fake
-  data, no auth). **Compliance rule: keep sandbox on while developing with
-  Claude.** The Oura API Agreement (4(d)) forbids feeding real API data to any
-  AI model, so Zak's real responses must never land in a Claude conversation.
-  Zak flips it to 0 himself for real data.
+- `OURA_USE_SANDBOX` in config.h is 0 (real data) in normal operation.
+  **Compliance rule: flip it to 1 (sandbox: fake data, dummy auth) before any
+  debugging session where Claude reads serial logs or API responses.** The
+  Oura API Agreement (4(d)) forbids feeding real API data to any AI model, so
+  Zak's real responses (including scores in serial logs and /api/status) must
+  never land in a Claude conversation. Note the sandbox was returning 500s
+  for everything except heartrate on 2026-06-09; retest before relying on it.
 - OAuth scopes: daily, heartrate, workout, spo2Daily.
 - GitHub Pages (privacy policy + ToS, required by the Oura app form) serves
   from `/docs` on main. Attorney-approved; don't edit without flagging.
