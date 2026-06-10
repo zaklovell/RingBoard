@@ -143,7 +143,10 @@ void loop() {
         return;
     }
 
-    if (screenOn && (!haveData || now - lastFetch >= REFRESH_MS)) {
+    // Failed fetches back off for FETCH_RETRY_MS instead of spinning; a
+    // sustained outage must not hammer Oura or torch the daily call budget.
+    uint32_t wait = haveData ? REFRESH_MS : FETCH_RETRY_MS;
+    if (screenOn && (lastFetch == 0 || now - lastFetch >= wait)) {
         lastFetch = now;
         refreshBoard();
         publishWebStatus();

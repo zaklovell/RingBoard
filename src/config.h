@@ -13,6 +13,7 @@
 
 // Oura data barely changes minute to minute; 10 minutes is plenty.
 constexpr uint32_t REFRESH_MS = 10UL * 60UL * 1000UL;
+constexpr uint32_t FETCH_RETRY_MS = 20UL * 1000UL;  // after a failed fetch
 constexpr int OURA_DAILY_BUDGET = 600;  // max API calls per day (4 per refresh)
 constexpr uint32_t STALE_AFTER_MS = 30UL * 60UL * 1000UL;
 constexpr uint32_t ERROR_AFTER_MS = 90UL * 60UL * 1000UL;

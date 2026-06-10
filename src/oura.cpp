@@ -171,11 +171,14 @@ static bool ouraGet(const char *endpoint, const char *startD, const char *endD,
     http.setTimeout(15000);
     http.setUserAgent(USER_AGENT);
     if (!http.begin(client, url)) return false;
-#if !OURA_USE_SANDBOX
+    // The sandbox needs an Authorization header too; any string satisfies it.
     char auth[224];
+#if OURA_USE_SANDBOX
+    snprintf(auth, sizeof(auth), "Bearer sandbox");
+#else
     snprintf(auth, sizeof(auth), "Bearer %s", accessToken);
-    http.addHeader("Authorization", auth);
 #endif
+    http.addHeader("Authorization", auth);
     http.addHeader("Accept", "application/json");
 
     int code = http.GET();
