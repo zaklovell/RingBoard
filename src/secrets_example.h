@@ -13,3 +13,6 @@
 // WiFi (2.4GHz only on this board)
 #define WIFI_SSID "your-ssid"
 #define WIFI_PASSWORD "your-password"
+
+// Shared secret for OTA reflash and POST /api/token (pick a long random string)
+#define DEVICE_SECRET "change-me"

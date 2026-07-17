@@ -8,3 +8,6 @@ bool ouraFetchAll(OuraData *out);
 int ouraCallsToday();
 // "ok", "auth" (re-run tools/oura_auth.py), or "net" for the web API.
 const char *ouraAuthState();
+// Replaces the refresh token (NVS + memory) and clears the auth-failed latch,
+// so a dead token can be fixed over the network instead of a reflash.
+void ouraSetRefreshToken(const char *token);

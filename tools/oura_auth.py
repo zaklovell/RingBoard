@@ -8,7 +8,11 @@ After that, flash the board (pio run -t upload) and it takes care of itself:
 the firmware refreshes the access token as needed and keeps the rotating
 refresh token in NVS.
 
-Usage: python3 tools/oura_auth.py
+Usage: python3 tools/oura_auth.py [--push http://<board-ip>]
+
+With --push, the fresh refresh token is also POSTed straight to the running
+board's /api/token (authenticated with DEVICE_SECRET from secrets.h), so no
+reflash is needed — the board picks it up and recovers within ~20 seconds.
 """
 
 import re
@@ -131,7 +135,29 @@ def main():
     )
     SECRETS_PATH.write_text(new_text)
     print(f"Refresh token written to {SECRETS_PATH}")
-    print("Now flash the board:  pio run -t upload")
+
+    push_url = None
+    if "--push" in sys.argv:
+        try:
+            push_url = sys.argv[sys.argv.index("--push") + 1].rstrip("/")
+        except IndexError:
+            sys.exit("error: --push needs a board URL, e.g. --push http://192.168.0.229")
+    if push_url:
+        device_secret = read_define(text, "DEVICE_SECRET")
+        req = urllib.request.Request(
+            push_url + "/api/token",
+            data=refresh.encode(),
+            headers={"Content-Type": "text/plain", "X-Auth": device_secret},
+            method="POST",
+        )
+        try:
+            with urllib.request.urlopen(req, timeout=15) as resp:
+                print(f"Pushed to board: HTTP {resp.status} {resp.read().decode()}")
+                print("The board should recover within ~20 seconds.")
+        except Exception as e:
+            sys.exit(f"error: push to board failed ({e}); flash instead: pio run -t upload")
+    else:
+        print("Now flash the board:  pio run -t upload")
 
 
 if __name__ == "__main__":

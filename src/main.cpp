@@ -2,6 +2,7 @@
 // sleep stages in the middle, activity along the bottom. Refreshes every 10
 // minutes and exposes a tiny HTTP API for Home Assistant.
 #include <Arduino.h>
+#include <ArduinoOTA.h>
 #include <TFT_eSPI.h>
 #include <WiFi.h>
 #include <time.h>
@@ -130,6 +131,12 @@ void setup() {
     tzset();
     configTzTime(TZ_SPEC, "pool.ntp.org", "time.google.com");
     webApiInit();
+    // OTA reflash over WiFi (pio run -t upload --upload-port <board-ip>).
+    // webApiInit already started mDNS, so ArduinoOTA must not start it again.
+    ArduinoOTA.setMdnsEnabled(false);
+    ArduinoOTA.setHostname(MDNS_NAME);
+    ArduinoOTA.setPassword(DEVICE_SECRET);
+    ArduinoOTA.begin();
 #if OURA_USE_SANDBOX
     uiBoot("RingBoard", "fetching (sandbox data)");
 #else
@@ -138,6 +145,7 @@ void setup() {
 }
 
 void loop() {
+    ArduinoOTA.handle();
     webApiLoop();
     applyScreenPower();
     uint32_t now = millis();

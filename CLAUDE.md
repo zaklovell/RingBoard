@@ -23,6 +23,8 @@ this local folder still carries the old name.
   theme), webapi.cpp (HA API at `ringboard.local`), main.cpp.
 - `tools/oura_auth.py`: one-time browser OAuth dance; writes the refresh token
   into `src/secrets.h`. Redirect URI is `http://localhost:8080/callback`.
+  `--push http://<board-ip>` additionally POSTs the token to the live board's
+  /api/token (X-Auth: DEVICE_SECRET) so re-auth needs no reflash.
 - Token lifecycle: Oura rotates refresh tokens, so the firmware persists the
   current one in NVS (`Preferences`, namespace "ringboard", key "rtok"); the
   compiled secrets.h value is only a first-boot seed.
@@ -60,8 +62,11 @@ Assistant drives. Its `esp32/README.md` documents the HA YAML.
   (CLK 25, MOSI 32, MISO 39, IRQ 36), so TFT_eSPI's same-bus touch won't work; use
   the XPT2046_Touchscreen library if touch is needed.
 - Onboard RGB LED on pins 4 (R), 16 (G), 17 (B), **active LOW**, very bright.
-- SD slot exists but nothing needs it; 4MB flash with the `huge_app.csv` partition
-  scheme (3MB app, no OTA) is the right layout.
+- SD slot exists but nothing needs it. Partitions: `min_spiffs.csv` (two ~1.9MB
+  OTA app slots) since the OTA branch — the app fits with ~45% headroom. OTA
+  reflash: `pio run -t upload --upload-port <board-ip>` with `--upload-flags
+  --auth=<DEVICE_SECRET>`; a dead Oura token can also be replaced with no flash
+  at all via `tools/oura_auth.py --push http://<board-ip>`.
 - **Upload at 460800 baud.** 921600 (the vendor-recommended speed) fails on the CH340
   with "Unable to verify flash chip connection". macOS has the CH340 driver built in;
   the board appears as /dev/cu.usbserial-XXXX. Zak's first board is usbserial-2130;
