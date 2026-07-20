@@ -1,11 +1,13 @@
 // Tiny HTTP API for Home Assistant at http://ringboard.local
-//   GET /api/status      -> JSON state
-//   GET /api/screen/on   -> force screen on   (overrides the night schedule)
-//   GET /api/screen/off  -> force screen off
-//   GET /api/screen/auto -> back to the schedule
+//   GET  /api/status      -> JSON state
+//   GET  /api/screen/on   -> force screen on   (overrides the night schedule)
+//   GET  /api/screen/off  -> force screen off
+//   GET  /api/screen/auto -> back to the schedule
+//   POST /api/token       -> body = new Oura refresh token, X-Auth: DEVICE_SECRET
 #include "webapi.h"
 #include "config.h"
 #include "oura.h"
+#include "secrets.h"
 #include <Arduino.h>
 #include <ESPmDNS.h>
 #include <WebServer.h>
@@ -51,7 +53,23 @@ void webApiInit() {
     } else {
         Serial.println("[web] mDNS start failed");
     }
+    static const char *collected[] = {"X-Auth"};
+    server.collectHeaders(collected, 1);
     server.on("/api/status", []() { handleStatus(); });
+    server.on("/api/token", HTTP_POST, []() {
+        if (server.header("X-Auth") != String(DEVICE_SECRET)) {
+            server.send(401, "application/json", "{\"error\":\"bad auth\"}");
+            return;
+        }
+        String token = server.arg("plain");
+        token.trim();
+        if (token.length() < 20 || token.length() >= 192) {
+            server.send(400, "application/json", "{\"error\":\"bad token\"}");
+            return;
+        }
+        ouraSetRefreshToken(token.c_str());
+        server.send(200, "application/json", "{\"ok\":true}");
+    });
     server.on("/api/screen/on", []() { handleScreen(SCREEN_FORCED_ON); });
     server.on("/api/screen/off", []() { handleScreen(SCREEN_FORCED_OFF); });
     server.on("/api/screen/auto", []() { handleScreen(SCREEN_AUTO); });

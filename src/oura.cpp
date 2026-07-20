@@ -54,6 +54,16 @@ void ouraInit() {
     }
 }
 
+void ouraSetRefreshToken(const char *token) {
+    snprintf(refreshToken, sizeof(refreshToken), "%s", token);
+    prefs.putString("rtok", refreshToken);
+    accessToken[0] = '\0';
+    tokenExpiryMs = 0;
+    authFailed = false;
+    netFailed = false;
+    Serial.println("[oura] refresh token replaced via web API");
+}
+
 static bool refreshAccessToken() {
     if (refreshToken[0] == '\0') {
         Serial.println("[oura] no refresh token; run tools/oura_auth.py");
