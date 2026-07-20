@@ -32,7 +32,7 @@ static const int BAND_H = 80;
 void uiInit(TFT_eSPI *t) {
     tft = t;
     tft->init();
-    tft->setRotation(1);
+    tft->setRotation(3);  // 180° from stock: board sits upside down on the desk
     tft->fillScreen(COL_BG);
     pinMode(TFT_BL, OUTPUT);
     digitalWrite(TFT_BL, HIGH);
