@@ -21,6 +21,15 @@ constexpr uint32_t ERROR_AFTER_MS = 90UL * 60UL * 1000UL;
 // Refresh the access token this long before it actually expires.
 constexpr uint32_t TOKEN_SLACK_SEC = 600;
 
+// Sleep-debt page: nightly need to compare against (the API doesn't expose
+// Oura's personalized Sleep Need, so this is a fixed target).
+constexpr int32_t SLEEP_NEED_SEC = 8L * 3600L;
+
+// A tap (XPT2046 T_IRQ read as plain GPIO) flips to the sleep-debt page;
+// fall back to the main page after this long.
+constexpr int TOUCH_IRQ_PIN = 36;
+constexpr uint32_t PAGE2_RETURN_MS = 30UL * 1000UL;
+
 // Screen schedule (local time): off from midnight to 7am. Home Assistant
 // overrides win over this.
 constexpr int SLEEP_START_HOUR = 0;

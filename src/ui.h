@@ -7,5 +7,6 @@
 
 void uiInit(TFT_eSPI *t);
 void uiBoot(const char *line1, const char *line2);
-void uiRender(const BoardView &v);
+// page 0 = scores/sleep/activity, page 1 = sleep debt + nightly graph.
+void uiRender(const BoardView &v, uint8_t page);
 void uiBacklight(bool on);

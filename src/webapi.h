@@ -9,7 +9,8 @@ struct WebStatus {
     int readiness = 0;
     int sleep = 0;
     int32_t steps = 0;
-    long updatedAt = 0;  // epoch seconds of the last good fetch
+    int32_t sleepDebtSec = 0;
+    long updatedAt = 0;  // epoch seconds of when fetched data last changed
 };
 
 void webApiInit();

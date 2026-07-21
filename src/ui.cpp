@@ -6,6 +6,7 @@
 //   Band B: total sleep plus a stacked deep/REM/light/awake stage bar.
 //   Band C: steps, distance, calories, inactive time.
 #include "ui.h"
+#include "config.h"
 #include <stdio.h>
 #include <string.h>
 
@@ -165,6 +166,8 @@ static void drawStageBar(const OuraData &d) {
     }
     if (x < bx + bw) spr->fillRect(x, by, bx + bw - x, bh, COL_AWAKE);
 
+    // Legend entries take their stage color instead of grey; the swatch
+    // squares become redundant, so the text stands alone.
     x = bx;
     spr->setTextFont(2);
     spr->setTextDatum(TL_DATUM);
@@ -172,10 +175,9 @@ static void drawStageBar(const OuraData &d) {
         char t[24], hm[8];
         fmtClock(s.sec, hm, sizeof(hm));
         snprintf(t, sizeof(t), "%s %s", s.name, hm);
-        spr->fillRect(x, 67, 6, 6, s.col);
-        spr->setTextColor(COL_SUB, COL_BG);
-        spr->drawString(t, x + 10, 62);
-        x += 10 + spr->textWidth(t) + 12;
+        spr->setTextColor(s.col, COL_BG);
+        spr->drawString(t, x, 62);
+        x += spr->textWidth(t) + 16;
     }
 }
 
@@ -216,6 +218,36 @@ static void fmtUpdated(time_t ts, char *out, size_t n) {
     snprintf(out, n, "%d:%02d %s", h, t.tm_min, t.tm_hour < 12 ? "AM" : "PM");
 }
 
+// White value with a grey unit after it, left-anchored at an ML baseline.
+// Fonts differ between the pieces, so widths are measured per piece; vf null
+// means the value uses the small font too.
+static void valueUnitL(int x, int y, const GFXfont *vf, const char *val,
+                       const char *unit) {
+    spr->setTextDatum(ML_DATUM);
+    if (vf) spr->setFreeFont(vf);
+    else spr->setTextFont(2);
+    spr->setTextColor(COL_TEXT, COL_BG);
+    spr->drawString(val, x, y);
+    int w = spr->textWidth(val);
+    spr->setTextFont(2);
+    spr->setTextColor(COL_SUB, COL_BG);
+    spr->drawString(unit, x + w + 6, y + (vf ? 3 : 0));
+}
+
+// Same, right-anchored: grey unit hugs xr, white value sits left of it.
+static void valueUnitR(int xr, int y, const GFXfont *vf, const char *val,
+                       const char *unit) {
+    spr->setTextDatum(MR_DATUM);
+    spr->setTextFont(2);
+    spr->setTextColor(COL_SUB, COL_BG);
+    spr->drawString(unit, xr, y + (vf ? 3 : 0));
+    int uw = spr->textWidth(unit);
+    if (vf) spr->setFreeFont(vf);
+    else spr->setTextFont(2);
+    spr->setTextColor(COL_TEXT, COL_BG);
+    spr->drawString(val, xr - uw - 6, y);
+}
+
 static void drawBandC(const BoardView &v) {
     bandStart();
     spr->drawFastHLine(12, 0, W - 24, COL_LINE);
@@ -243,39 +275,137 @@ static void drawBandC(const BoardView &v) {
 
     char steps[16], buf[40];
     fmtThousands(v.d.steps, steps, sizeof(steps));
-    spr->setTextDatum(ML_DATUM);
-    spr->setFreeFont(&FreeSansBold18pt7b);
-    spr->setTextColor(COL_TEXT, COL_BG);
-    spr->drawString(steps, 18, 36);
-    int x = 18 + spr->textWidth(steps) + 8;
-    spr->setFreeFont(&FreeSans9pt7b);
-    spr->setTextColor(COL_SUB, COL_BG);
-    spr->drawString("steps", x, 42);
+    valueUnitL(18, 34, &FreeSansBold12pt7b, steps, "steps");
+    snprintf(buf, sizeof(buf), "%.1f", v.d.distanceM / 1609.34f);
+    valueUnitR(302, 34, &FreeSansBold12pt7b, buf, "mi");
 
-    spr->setTextDatum(MR_DATUM);
-    spr->setTextColor(COL_TEXT, COL_BG);
-    snprintf(buf, sizeof(buf), "%.1f mi", v.d.distanceM / 1609.34f);
-    spr->drawString(buf, 302, 36);
-
-    spr->setTextDatum(ML_DATUM);
-    spr->setTextColor(COL_SUB, COL_BG);
     char totalCal[12];
     fmtThousands(v.d.totalCal, totalCal, sizeof(totalCal));
-    snprintf(buf, sizeof(buf), "%d active  ·  %s total cal", v.d.activeCal,
-             totalCal);
-    spr->drawString(buf, 18, 66);
+    snprintf(buf, sizeof(buf), "%d / %s", v.d.activeCal, totalCal);
+    valueUnitL(18, 64, nullptr, buf, "cal");
 
     char sed[12];
     fmtHoursMin(v.d.sedentarySec, sed, sizeof(sed));
-    snprintf(buf, sizeof(buf), "%s inactive", sed);
-    spr->setTextDatum(MR_DATUM);
-    spr->drawString(buf, 302, 66);
+    valueUnitR(302, 64, nullptr, sed, "inactive");
 
     bandPush(160);
 }
 
-void uiRender(const BoardView &v) {
-    drawBandA(v);
-    drawBandB(v);
-    drawBandC(v);
+// ---- Page 2: sleep debt against SLEEP_NEED_SEC over the last HIST_DAYS ----
+
+static uint16_t debtColor(int32_t debtSec) {
+    if (debtSec <= 3600) return COL_TEAL;
+    if (debtSec <= 3 * 3600) return COL_BLUE;
+    if (debtSec <= 6 * 3600) return COL_AMBER;
+    return COL_RED;
+}
+
+static void drawDebtHeader(const BoardView &v) {
+    bandStart();
+    statusDot(v.status);
+    spr->setTextDatum(TL_DATUM);
+    spr->setTextFont(2);
+    spr->setTextColor(COL_SUB, COL_BG);
+    spr->drawString("SLEEP DEBT", 18, 2);
+
+    if (!v.d.haveHist) {
+        spr->setTextDatum(ML_DATUM);
+        spr->setFreeFont(&FreeSans12pt7b);
+        spr->drawString("No sleep history yet", 18, 46);
+        bandPush(0);
+        return;
+    }
+
+    char val[16];
+    fmtHoursMin(v.d.sleepDebtSec, val, sizeof(val));
+    spr->setTextDatum(ML_DATUM);
+    spr->setFreeFont(&FreeSansBold24pt7b);
+    spr->setTextColor(debtColor(v.d.sleepDebtSec), COL_BG);
+    spr->drawString(val, 18, 46);
+
+    // Context on the right: the fixed need, and the average of logged nights.
+    int nights = 0;
+    int64_t sum = 0;
+    for (int i = 0; i < HIST_DAYS; i++) {
+        if (v.d.histSec[i] > 0) {
+            nights++;
+            sum += v.d.histSec[i];
+        }
+    }
+    char buf[28], hm[12];
+    spr->setTextDatum(TR_DATUM);
+    spr->setTextFont(2);
+    spr->setTextColor(COL_SUB, COL_BG);
+    snprintf(buf, sizeof(buf), "vs %ldh need", (long)(SLEEP_NEED_SEC / 3600));
+    spr->drawString(buf, 302, 26);
+    if (nights > 0) {
+        fmtHoursMin((int32_t)(sum / nights), hm, sizeof(hm));
+        snprintf(buf, sizeof(buf), "avg %s", hm);
+        spr->drawString(buf, 302, 44);
+    }
+    bandPush(0);
+}
+
+// One bar per night in absolute screen coords; the sprite clips whatever
+// falls outside the current band, so the same call renders both bands.
+static void drawDebtChart(const OuraData &d, int yoff) {
+    const int chartTop = 92, chartBot = 214;
+    const int bx = 24, bw = W - 48;
+    int32_t maxSec = 10L * 3600L;
+    for (int i = 0; i < HIST_DAYS; i++) {
+        if (d.histSec[i] > maxSec) maxSec = d.histSec[i];
+    }
+    int slotW = bw / HIST_DAYS;
+    int barW = slotW - 6;
+
+    int needY = chartBot -
+                (int)((int64_t)SLEEP_NEED_SEC * (chartBot - chartTop) / maxSec);
+    for (int x = bx; x < bx + bw; x += 8) {
+        spr->drawFastHLine(x, needY - yoff, 4, COL_SUB);
+    }
+
+    for (int i = 0; i < HIST_DAYS; i++) {
+        int x = bx + i * slotW + 3;
+        if (d.histSec[i] <= 0) {
+            // ring not worn / not synced: a faint floor tick, not a zero bar
+            spr->drawFastHLine(x, chartBot - 1 - yoff, barW, COL_LINE);
+            continue;
+        }
+        int h = (int)((int64_t)d.histSec[i] * (chartBot - chartTop) / maxSec);
+        if (h < 2) h = 2;
+        uint16_t c = d.histSec[i] >= SLEEP_NEED_SEC          ? COL_TEAL
+                     : d.histSec[i] >= SLEEP_NEED_SEC * 3 / 4 ? COL_AMBER
+                                                              : COL_RED;
+        spr->fillRect(x, chartBot - h - yoff, barW, h, c);
+    }
+}
+
+static void drawDebtBands(const BoardView &v) {
+    bandStart();
+    spr->drawFastHLine(12, 0, W - 24, COL_LINE);
+    if (v.d.haveHist) drawDebtChart(v.d, 80);
+    bandPush(80);
+
+    bandStart();
+    if (v.d.haveHist) {
+        drawDebtChart(v.d, 160);
+        spr->setTextFont(2);
+        spr->setTextColor(COL_SUB, COL_BG);
+        spr->setTextDatum(TL_DATUM);
+        spr->drawString("14 nights ago", 24, 62);
+        spr->setTextDatum(TR_DATUM);
+        spr->drawString("last night", 296, 62);
+    }
+    bandPush(160);
+}
+
+void uiRender(const BoardView &v, uint8_t page) {
+    if (page == 1) {
+        drawDebtHeader(v);
+        drawDebtBands(v);
+    } else {
+        drawBandA(v);
+        drawBandB(v);
+        drawBandC(v);
+    }
 }

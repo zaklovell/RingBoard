@@ -31,11 +31,13 @@ static void handleStatus() {
     snprintf(body, sizeof(body),
              "{\"screen\":\"%s\",\"screen_on\":%s,\"have_data\":%s,"
              "\"readiness\":%d,\"sleep\":%d,\"steps\":%ld,"
+             "\"sleep_debt_min\":%ld,"
              "\"updated_at\":%ld,\"age_sec\":%ld,"
              "\"auth\":\"%s\",\"oura_calls_today\":%d,\"free_heap\":%u}",
              modeName(), status.screenOn ? "true" : "false",
              status.haveData ? "true" : "false", status.readiness,
-             status.sleep, (long)status.steps, status.updatedAt, age,
+             status.sleep, (long)status.steps,
+             (long)(status.sleepDebtSec / 60), status.updatedAt, age,
              ouraAuthState(), ouraCallsToday(), (unsigned)ESP.getFreeHeap());
     server.send(200, "application/json", body);
 }

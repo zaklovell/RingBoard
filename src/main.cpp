@@ -21,6 +21,9 @@ static uint32_t lastFetch = 0;
 static uint32_t lastGoodFetch = 0;
 static bool haveData = false;
 static bool screenOn = true;
+static uint8_t page = 0;          // 0 = main, 1 = sleep debt
+static uint32_t pageFlipAt = 0;
+static uint32_t lastTapMs = 0;
 
 static void ledInit() {
     pinMode(LED_R_PIN, OUTPUT);
@@ -69,8 +72,22 @@ static void publishWebStatus() {
     s.readiness = view.d.haveReadiness ? view.d.readinessScore : 0;
     s.sleep = view.d.haveSleep ? view.d.sleepScore : 0;
     s.steps = view.d.haveActivity ? view.d.steps : 0;
+    s.sleepDebtSec = view.d.haveHist ? view.d.sleepDebtSec : 0;
     s.updatedAt = (long)view.updatedAt;
     webApiSetStatus(s);
+}
+
+// The "updated" stamp tracks when the DATA last changed, not when the last
+// fetch ran — a 10-minute poll that returns the same numbers doesn't count.
+static bool sameData(const OuraData &a, const OuraData &b) {
+    return a.readinessScore == b.readinessScore &&
+           a.sleepScore == b.sleepScore &&
+           a.activityScore == b.activityScore &&
+           a.totalSleepSec == b.totalSleepSec && a.deepSec == b.deepSec &&
+           a.remSec == b.remSec && a.lightSec == b.lightSec &&
+           a.awakeSec == b.awakeSec && a.steps == b.steps &&
+           a.activeCal == b.activeCal && a.totalCal == b.totalCal &&
+           a.sedentarySec == b.sedentarySec;
 }
 
 static void refreshBoard() {
@@ -85,8 +102,9 @@ static void refreshBoard() {
         }
         return;
     }
+    bool changed = !haveData || !sameData(d, view.d);
     view.d = d;
-    view.updatedAt = time(nullptr);
+    if (changed) view.updatedAt = time(nullptr);
     lastGoodFetch = millis();
     haveData = true;
     Serial.printf(
@@ -117,13 +135,34 @@ static void applyScreenPower() {
     if (screenOn) {
         lastFetch = 0;  // refresh immediately on wake
         view.status = currentStatus();
-        uiRender(view);
+        uiRender(view, page);
+    }
+}
+
+// XPT2046 T_IRQ sits LOW while the panel is pressed; polled as a plain GPIO
+// so a tap flips pages without pulling in the touch library. The debt page
+// falls back to the main page on its own after PAGE2_RETURN_MS.
+static void pollTouch() {
+    if (!screenOn || !haveData) return;
+    uint32_t now = millis();
+    if (digitalRead(TOUCH_IRQ_PIN) == LOW && now - lastTapMs > 500) {
+        lastTapMs = now;
+        page ^= 1;
+        pageFlipAt = now;
+        view.status = currentStatus();
+        uiRender(view, page);
+    }
+    if (page == 1 && now - pageFlipAt > PAGE2_RETURN_MS) {
+        page = 0;
+        view.status = currentStatus();
+        uiRender(view, page);
     }
 }
 
 void setup() {
     Serial.begin(115200);
     ledInit();
+    pinMode(TOUCH_IRQ_PIN, INPUT);
     uiInit(&tft);
     ouraInit();
     connectWiFi();
@@ -148,6 +187,7 @@ void loop() {
     ArduinoOTA.handle();
     webApiLoop();
     applyScreenPower();
+    pollTouch();
     uint32_t now = millis();
 
     if (WiFi.status() != WL_CONNECTED) {
@@ -165,7 +205,7 @@ void loop() {
         publishWebStatus();
         if (haveData) {
             view.status = currentStatus();
-            uiRender(view);
+            uiRender(view, page);
         }
     }
 

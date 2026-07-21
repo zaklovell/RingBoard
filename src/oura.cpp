@@ -140,8 +140,8 @@ static bool ensureToken() {
 #endif
 }
 
-// Local dates for the query window: a few days back so the latest documents
-// are always in range even right after midnight or before the morning sync.
+// Local dates for the query window: HIST_DAYS back so the sleep fetch covers
+// the whole debt history (the score fetches still just pick the newest day).
 // The window ends tomorrow, not today: Oura computes days in the app's
 // timezone (which may differ from this board's TZ) and end_date isn't
 // documented as inclusive, so pad a day. Future days just return nothing.
@@ -151,10 +151,32 @@ static bool dateRange(char *startD, size_t sn, char *endD, size_t en) {
     time_t fwd = time(nullptr) + 86400;
     localtime_r(&fwd, &t);
     strftime(endD, en, "%Y-%m-%d", &t);
-    time_t back = time(nullptr) - 3 * 86400;
+    time_t back = time(nullptr) - (time_t)HIST_DAYS * 86400;
     localtime_r(&back, &t);
     strftime(startD, sn, "%Y-%m-%d", &t);
     return true;
+}
+
+// "YYYY-MM-DD" -> whole days before today (0 = today), or -1 if unparseable.
+// Both sides anchored to noon so DST shifts can't skew the division.
+static int daysAgo(const char *day) {
+    int y, m, d;
+    if (sscanf(day, "%d-%d-%d", &y, &m, &d) != 3) return -1;
+    struct tm t = {};
+    t.tm_year = y - 1900;
+    t.tm_mon = m - 1;
+    t.tm_mday = d;
+    t.tm_hour = 12;
+    time_t then = mktime(&t);
+    struct tm nowTm;
+    if (then == (time_t)-1 || !getLocalTime(&nowTm, 50)) return -1;
+    nowTm.tm_hour = 12;
+    nowTm.tm_min = 0;
+    nowTm.tm_sec = 0;
+    time_t noonToday = mktime(&nowTm);
+    long diff = (long)(noonToday - then);
+    if (diff < 0) return -1;
+    return (int)((diff + 43200) / 86400);
 }
 
 static bool ouraGet(const char *endpoint, const char *startD, const char *endD,
@@ -252,6 +274,8 @@ static bool fetchSleepDetail(const char *startD, const char *endD,
 
     // Newest day wins; on a tie prefer long_sleep over an unscored "sleep"
     // period, then the longest. Naps ("late_nap", "rest") never qualify.
+    // The same pass accumulates per-night totals (naps included, "rest"
+    // excluded) into the debt history.
     const char *bestDay = "";
     bool bestLong = false;
     int32_t bestTotal = -1;
@@ -261,7 +285,17 @@ static bool fetchSleepDetail(const char *startD, const char *endD,
         const char *type = s["type"] | "";
         int32_t total = s["total_sleep_duration"] | 0;
         bool isLong = strcmp(type, "long_sleep") == 0;
-        if (!day[0] || (!isLong && strcmp(type, "sleep") != 0)) continue;
+        bool isSleep = isLong || strcmp(type, "sleep") == 0 ||
+                       strcmp(type, "late_nap") == 0;
+        if (!day[0] || !isSleep || total <= 0) continue;
+
+        int ago = daysAgo(day);
+        if (ago >= 0 && ago < HIST_DAYS) {
+            out->histSec[HIST_DAYS - 1 - ago] += total;
+            out->haveHist = true;
+        }
+
+        if (!isLong && strcmp(type, "sleep") != 0) continue;
         int cmp = strcmp(day, bestDay);
         bool better = cmp > 0;
         if (cmp == 0) {
@@ -274,6 +308,17 @@ static bool fetchSleepDetail(const char *startD, const char *endD,
             best = s;
         }
     }
+
+    // Debt: run oldest to newest, surplus pays existing debt down but never
+    // banks ahead, so the total floors at zero after every night with data.
+    int32_t debt = 0;
+    for (int i = 0; i < HIST_DAYS; i++) {
+        if (out->histSec[i] <= 0) continue;
+        debt += SLEEP_NEED_SEC - out->histSec[i];
+        if (debt < 0) debt = 0;
+    }
+    out->sleepDebtSec = debt;
+
     if (bestTotal < 0) return false;
     out->totalSleepSec = bestTotal;
     out->deepSec = best["deep_sleep_duration"] | 0;
