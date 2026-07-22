@@ -39,7 +39,9 @@ static uint32_t lastTapMs = 0;
 static uint32_t greenBlinkUntil = 0;
 static int prevCalToGoal = -1;
 
-static bool demoActive() { return demoUntilMs != 0 && millis() < demoUntilMs; }
+static bool demoActive() {
+    return demoUntilMs != 0 && (int32_t)(demoUntilMs - millis()) > 0;
+}
 
 // ---- LED (#7): active-LOW RGB via PWM so it reads, not glares -------------
 enum { LEDC_R = 0, LEDC_G = 1, LEDC_B = 2 };
@@ -51,6 +53,10 @@ static void ledInit() {
     ledcAttachPin(LED_R_PIN, LEDC_R);
     ledcAttachPin(LED_G_PIN, LEDC_G);
     ledcAttachPin(LED_B_PIN, LEDC_B);
+    // Active-low: attach defaults to duty 0 = fully ON; go dark immediately.
+    ledcWrite(LEDC_R, 255);
+    ledcWrite(LEDC_G, 255);
+    ledcWrite(LEDC_B, 255);
 }
 
 // duty 0..255 of intended brightness; pin is active low.
@@ -89,7 +95,7 @@ static void ledTask() {
         ledWrite(LED_DUTY, 0, 0);
         return;
     }
-    if (now < greenBlinkUntil) {
+    if (greenBlinkUntil != 0 && (int32_t)(greenBlinkUntil - now) > 0) {
         bool on = ((greenBlinkUntil - now) / 250) % 2 == 0;
         ledWrite(0, on ? LED_DUTY : 0, 0);
         return;
@@ -152,13 +158,19 @@ static bool sameData(const OuraData &a, const OuraData &b) {
            a.activeCal == b.activeCal && a.totalCal == b.totalCal &&
            a.targetCal == b.targetCal && a.sedentarySec == b.sedentarySec &&
            a.avgHrv == b.avgHrv && a.lowestHr == b.lowestHr &&
-           a.focusCue == b.focusCue &&
+           a.focusCue == b.focusCue && a.focusReason == b.focusReason &&
+           a.focusValue == b.focusValue &&
            a.stressHighSec == b.stressHighSec &&
-           a.recoveryHighSec == b.recoveryHighSec;
+           a.recoveryHighSec == b.recoveryHighSec &&
+           a.sleepDebtSec == b.sleepDebtSec &&
+           a.distanceM == b.distanceM &&
+           a.haveBedtime == b.haveBedtime &&
+           a.bedtimeStartSec == b.bedtimeStartSec;
 }
 
 static void render() {
     if (!screenOn) return;
+    ouraRecomputeDebt(&view.d);  // follows /api/config need changes
     view.cue = webApiCue();
     view.status = currentStatus();
     if (!uiPageAvailable(view, page)) page = PAGE_MAIN;
@@ -166,7 +178,7 @@ static void render() {
 }
 
 static void refreshBoard() {
-    OuraData d;
+    OuraData d = view.d;  // merge-on-failure: failed sections keep old data
     lastPollAt = (long)time(nullptr);
     if (!ouraFetchAll(&d)) {
         Serial.println("[board] fetch failed");
@@ -207,7 +219,7 @@ static void loadDemoData() {
     d.activityScore = 63;
     d.readinessAgoDays = d.sleepScoreAgoDays = d.sleepAgoDays =
         d.activityAgoDays = 0;
-    d.totalSleepSec = 7 * 3600 + 24 * 60;
+    d.totalSleepSec = 24000;  // 6h40m = deep+REM+light, awake excluded
     d.deepSec = 5100;
     d.remSec = 6420;
     d.lightSec = 12480;
@@ -240,7 +252,7 @@ static void loadDemoData() {
     d.haveHist = true;
     static const int32_t hist[HIST_DAYS] = {
         27000, 23400, 30600, 18000, 25200, 32400, 0,     24300,
-        29100, 21600, 26100, 31500, 23700, 26640};
+        29100, 21600, 26100, 31500, 23700, 24000};
     memcpy(d.histSec, hist, sizeof(hist));
     d.histNights = 13;
     d.sleepDebtSec = 3 * 3600 + 10 * 60;
@@ -255,7 +267,7 @@ static void loadDemoData() {
 static bool screenShouldBeOn() {
     if (screenMode() == SCREEN_FORCED_ON) return true;
     if (screenMode() == SCREEN_FORCED_OFF) return false;
-    if (millis() < wakeUntilMs) return true;
+    if (wakeUntilMs != 0 && (int32_t)(wakeUntilMs - millis()) > 0) return true;
     if (demoActive()) return true;
     struct tm t;
     if (!getLocalTime(&t, 10)) return true;  // no clock yet: stay on
@@ -271,6 +283,7 @@ static void applyScreenPower() {
     if (want == screenOn) return;
     screenOn = want;
     uiBacklight(screenOn);
+    publishMeta();
     Serial.printf("[screen] %s\n", screenOn ? "on" : "off");
     if (screenOn) {
         lastFetch = 0;  // refresh soon after wake
@@ -281,7 +294,6 @@ static void applyScreenPower() {
 // Short tap: wake the screen, or cycle pages (skipping empty ones).
 // Long press: dismiss the active cue, else drop a forced screen to auto.
 static void pollTouch() {
-    if (!haveData) return;
     uint32_t now = millis();
     int lvl = digitalRead(TOUCH_IRQ_PIN);
 
@@ -305,13 +317,16 @@ static void pollTouch() {
 
     if (pressed) {
         pressed = false;
-        if (longFired || now - lastTapMs < 300) return;
+        // <30ms = electrical noise, not a finger.
+        if (longFired || now - pressStartMs < 30 || now - lastTapMs < 300)
+            return;
         lastTapMs = now;
         if (!screenOn) {
             wakeUntilMs = now + WAKE_TAP_MS;
             applyScreenPower();
             return;
         }
+        if (!haveData) return;  // wake works dataless; page cycling doesn't
         for (int i = 0; i < PAGE_COUNT; i++) {
             page = (page + 1) % PAGE_COUNT;
             if (uiPageAvailable(view, page)) break;
@@ -358,13 +373,16 @@ void loop() {
     if (webApiDemoPending(&dPage, &dMin)) {
         demoUntilMs = millis() + (uint32_t)dMin * 60000UL;
         loadDemoData();
-        if (dPage >= 0 && dPage < PAGE_COUNT) page = (uint8_t)dPage;
+        if (dPage >= 0 && dPage < PAGE_COUNT) {
+            page = (uint8_t)dPage;
+            pageFlipAt = millis();
+        }
         applyScreenPower();
         render();
         publishMeta();
         Serial.printf("[demo] armed for %d min, page %d\n", dMin, dPage);
     }
-    if (demoUntilMs != 0 && millis() >= demoUntilMs) {
+    if (demoUntilMs != 0 && (int32_t)(demoUntilMs - millis()) <= 0) {
         demoUntilMs = 0;
         haveData = false;  // force a real refetch below
         lastFetch = 0;
@@ -397,11 +415,17 @@ void loop() {
     // Fetch on cadence even with the screen off (#9) so HA stays fresh;
     // failed fetches back off for FETCH_RETRY_MS instead of spinning.
     if (!demoActive()) {
+        static int failStreak = 0;
+        uint32_t retry = FETCH_RETRY_MS << (failStreak > 5 ? 5 : failStreak);
+        if (retry > 600000UL) retry = 600000UL;
         uint32_t wait = haveData ? (screenOn ? REFRESH_MS : REFRESH_OFF_MS)
-                                 : FETCH_RETRY_MS;
+                                 : retry;
         if (lastFetch == 0 || now - lastFetch >= wait) {
             lastFetch = now;
+            bool had = haveData;
             refreshBoard();
+            failStreak = haveData ? 0 : failStreak + 1;
+            (void)had;
             publishMeta();
             if (haveData) render();
         }

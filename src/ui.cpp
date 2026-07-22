@@ -36,7 +36,7 @@ void uiSetPlan(int wakeMin, int32_t needSec) {
 static const uint16_t COL_BG = RGB565(10, 14, 22);
 static const uint16_t COL_TEXT = 0xFFFF;
 static const uint16_t COL_SUB = RGB565(136, 148, 168);
-static const uint16_t COL_DIM = RGB565(90, 100, 118);
+static const uint16_t COL_DIM = RGB565(112, 122, 140);
 static const uint16_t COL_LINE = RGB565(38, 46, 62);
 static const uint16_t COL_TEAL = RGB565(64, 211, 198);    // optimal, 85+
 static const uint16_t COL_BLUE = RGB565(116, 166, 255);   // good, 70-84
@@ -81,14 +81,23 @@ void uiBoot(const char *line1, const char *line2) {
 
 static void bandStart() { spr->fillSprite(COL_BG); }
 
+static uint32_t capDeadline = 0;
+
 static void bandPush(int y) {
     if (cap) {
         // Stream this band's raw RGB565 out instead of touching the panel.
         const uint8_t *buf = (const uint8_t *)spr->getPointer();
         size_t left = (size_t)W * BAND_H * 2;
         while (left > 0 && cap->connected()) {
+            if ((int32_t)(capDeadline - millis()) <= 0) {
+                cap->stop();  // don't leave a short 200 response dangling
+                break;
+            }
             size_t n = cap->write(buf, left > 1436 ? 1436 : left);
-            if (n == 0) break;
+            if (n == 0) {
+                cap->stop();
+                break;
+            }
             buf += n;
             left -= n;
         }
@@ -275,8 +284,9 @@ static void drawBandA(const BoardView &v) {
         drawRing(160, 34, 27, "SLEEP", v.d.haveSleep && !sStale,
                  v.d.sleepScore, haveSd, sd);
         drawRing(256, 34, 27, "ACTIVITY",
-                 v.d.haveActivity && v.d.activityScore > 0, v.d.activityScore,
-                 haveAd, ad);
+                 v.d.haveActivity && v.d.activityScore > 0 &&
+                     !metricStale(v.d.activityAgoDays),
+                 v.d.activityScore, haveAd, ad);
     } else {
         // Banner mode: smaller label-less rings tucked under the strip.
         drawRing(64, 50, 22, nullptr, v.d.haveReadiness && !rStale,
@@ -516,9 +526,9 @@ static void drawFocusPage(const BoardView &v) {
     spr->setTextColor(COL_SUB, COL_BG);
     spr->drawString("TODAY'S FOCUS", 18, top + 2);
     spr->setTextDatum(ML_DATUM);
-    spr->setFreeFont(&FreeSansBold18pt7b);
+    spr->setFreeFont(top ? &FreeSansBold12pt7b : &FreeSansBold18pt7b);
     spr->setTextColor(COL_TEXT, COL_BG);
-    spr->drawString(focusTitle(v.d.focusCue), 18, top + 46);
+    spr->drawString(focusTitle(v.d.focusCue), 18, top ? top + 34 : 46);
     bandPush(0);
 
     bandStart();
@@ -547,7 +557,9 @@ static void drawFocusPage(const BoardView &v) {
     spr->setTextDatum(TL_DATUM);
     spr->setTextColor(COL_DIM, COL_BG);
     spr->drawString("from your readiness & sleep contributors", 18, 8);
-    spr->drawString("tap: next page   hold: dismiss cue", 18, 56);
+    spr->drawString(v.cue != CUE_NONE ? "tap: next page   hold: dismiss cue"
+                                       : "tap: next page   hold: screen auto",
+                    18, 56);
     bandPush(160);
 }
 
@@ -614,11 +626,18 @@ static void drawDebtHeader(const BoardView &v) {
         fmtWallMin((int)(v.d.bedtimeEndSec / 60), b1, sizeof(b1));
         snprintf(plan, sizeof(plan), "OURA WINDOW  %s - %s", b0, b1);
     } else {
-        char bed[16], wake[16];
+        char bed[16], wake[16], need[12];
         fmtWallMin(planWakeMin - (int)(planNeedSec / 60), bed, sizeof(bed));
         fmtWallMin(planWakeMin, wake, sizeof(wake));
-        snprintf(plan, sizeof(plan), "IN BED BY %s  FOR %ldH BY %s", bed,
-                 (long)(planNeedSec / 3600), wake);
+        if (planNeedSec % 3600 == 0) {
+            snprintf(need, sizeof(need), "%ldH", (long)(planNeedSec / 3600));
+        } else {
+            snprintf(need, sizeof(need), "%ldH%02ldM",
+                     (long)(planNeedSec / 3600),
+                     (long)((planNeedSec % 3600) / 60));
+        }
+        snprintf(plan, sizeof(plan), "IN BED BY %s  FOR %s BY %s", bed, need,
+                 wake);
     }
     spr->setTextDatum(TL_DATUM);
     spr->setTextColor(COL_TEAL, COL_BG);
@@ -672,7 +691,7 @@ static void drawDebtBands(const BoardView &v) {
         spr->setTextFont(2);
         spr->setTextColor(COL_SUB, COL_BG);
         spr->setTextDatum(TL_DATUM);
-        spr->drawString("14 nights ago", 24, 62);
+        spr->drawString("13 nights ago", 24, 62);
         spr->setTextDatum(TR_DATUM);
         spr->drawString("last night", 296, 62);
     }
@@ -693,9 +712,9 @@ static void drawStressPage(const BoardView &v) {
         fmtHoursMin(v.d.stressHighSec, hm, sizeof(hm));
         snprintf(buf, sizeof(buf), "%s stress", hm);
         spr->setTextDatum(ML_DATUM);
-        spr->setFreeFont(&FreeSansBold18pt7b);
+        spr->setFreeFont(top ? &FreeSansBold12pt7b : &FreeSansBold18pt7b);
         spr->setTextColor(COL_AMBER, COL_BG);
-        spr->drawString(buf, 18, top + 46);
+        spr->drawString(buf, 18, top ? top + 34 : 46);
     }
     bandPush(0);
 
@@ -776,6 +795,7 @@ void uiRender(const BoardView &v, uint8_t page) {
 
 void uiStreamScreenshot(WiFiClient &out, const BoardView &v, uint8_t page) {
     cap = &out;
+    capDeadline = millis() + 10000;  // whole-screen budget
     uiRender(v, page);
     cap = nullptr;
 }

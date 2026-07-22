@@ -95,7 +95,8 @@ static void handleStatus() {
         body, sizeof(body),
         "{\"screen\":\"%s\",\"screen_on\":%s,\"have_data\":%s,\"demo\":%s,"
         "\"readiness\":%d,\"readiness_ago\":%d,"
-        "\"sleep\":%d,\"sleep_ago\":%d,\"sleep_fresh\":%s,"
+        "\"sleep\":%d,\"sleep_score_ago\":%d,\"sleep_detail_ago\":%d,"
+        "\"activity_ago\":%d,\"stress_ago\":%d,\"sleep_fresh\":%s,"
         "\"total_sleep_min\":%ld,\"rhr\":%d,\"hrv\":%d,"
         "\"activity\":%d,\"steps\":%ld,\"active_cal\":%d,\"target_cal\":%d,"
         "\"cal_to_goal\":%d,"
@@ -109,8 +110,8 @@ static void handleStatus() {
         modeName(), meta.screenOn ? "true" : "false",
         meta.haveData ? "true" : "false", meta.demo ? "true" : "false",
         d.haveReadiness ? d.readinessScore : 0, d.readinessAgoDays,
-        d.haveSleep ? d.sleepScore : 0, d.sleepAgoDays,
-        sleepFresh() ? "true" : "false",
+        d.haveSleep ? d.sleepScore : 0, d.sleepScoreAgoDays, d.sleepAgoDays,
+        d.activityAgoDays, d.stressAgoDays, sleepFresh() ? "true" : "false",
         (long)(d.haveSleepDetail ? d.totalSleepSec / 60 : 0), d.lowestHr,
         d.avgHrv, d.haveActivity ? d.activityScore : 0, (long)d.steps,
         d.activeCal, d.targetCal, calToGoal,
@@ -121,6 +122,7 @@ static void handleStatus() {
         (long)(needSec / 60), updatedAt, age, meta.lastPollAt,
         meta.lastSuccessAt, ouraAuthState(), ouraCallsToday(),
         (unsigned)ESP.getFreeHeap());
+    server.sendHeader("Cache-Control", "no-store");
     server.send(200, "application/json", body);
 }
 
@@ -148,24 +150,40 @@ static void handleCue() {
     server.send(200, "application/json", body);
 }
 
+static bool parseIntStrict(const String &s, long *out) {
+    if (s.length() == 0) return false;
+    char *end = nullptr;
+    long v = strtol(s.c_str(), &end, 10);
+    if (end == nullptr || *end != '\0') return false;
+    *out = v;
+    return true;
+}
+
 static void handleConfig() {
     if (server.method() == HTTP_POST) {
         if (!authed()) return;
-        if (server.hasArg("wake_min")) {
-            int w = server.arg("wake_min").toInt();
-            if (w >= 0 && w < 24 * 60) {
-                wakeMin = w;
-                cfg.putInt("wake_min", w);
-            }
+        long w = wakeMin, n = needSec / 60;
+        bool haveW = server.hasArg("wake_min");
+        bool haveN = server.hasArg("need_min");
+        // Validate the whole request before mutating anything.
+        if ((haveW && (!parseIntStrict(server.arg("wake_min"), &w) || w < 0 ||
+                       w >= 24 * 60)) ||
+            (haveN && (!parseIntStrict(server.arg("need_min"), &n) ||
+                       n < 4 * 60 || n > 12 * 60))) {
+            server.send(400, "application/json",
+                        "{\"error\":\"bad config value\"}");
+            return;
         }
-        if (server.hasArg("need_min")) {
-            long n = server.arg("need_min").toInt();
-            if (n >= 4 * 60 && n <= 12 * 60) {
-                needSec = (int32_t)n * 60;
-                cfg.putLong("need_sec", needSec);
-            }
+        if (haveW && (int)w != wakeMin) {
+            wakeMin = (int)w;
+            cfg.putInt("wake_min", wakeMin);
+        }
+        if (haveN && (int32_t)(n * 60) != needSec) {
+            needSec = (int32_t)n * 60;
+            cfg.putLong("need_sec", needSec);
         }
         uiSetPlan(wakeMin, needSec);
+        ouraSetNeedSec(needSec);
     }
     char body[64];
     snprintf(body, sizeof(body), "{\"wake_min\":%d,\"need_min\":%ld}", wakeMin,
@@ -190,6 +208,14 @@ static void handleScreenshot() {
         return;
     }
     int page = server.hasArg("page") ? server.arg("page").toInt() : -1;
+    if (page >= PAGE_COUNT) {
+        server.send(400, "application/json", "{\"error\":\"bad page\"}");
+        return;
+    }
+    server.sendHeader("Cache-Control", "no-store");
+    server.sendHeader("X-Width", "320");
+    server.sendHeader("X-Height", "240");
+    server.sendHeader("X-Format", "rgb565-be");
     server.setContentLength(320UL * 240UL * 2UL);
     server.send(200, "application/octet-stream", "");
     WiFiClient client = server.client();
@@ -201,7 +227,10 @@ void webApiInit(const BoardView *view) {
     cfg.begin("rbcfg", false);
     wakeMin = cfg.getInt("wake_min", DEFAULT_WAKE_MIN);
     needSec = cfg.getLong("need_sec", SLEEP_NEED_SEC);
+    if (wakeMin < 0 || wakeMin >= 24 * 60) wakeMin = DEFAULT_WAKE_MIN;
+    if (needSec < 4L * 3600L || needSec > 12L * 3600L) needSec = SLEEP_NEED_SEC;
     uiSetPlan(wakeMin, needSec);
+    ouraSetNeedSec(needSec);
 
     if (MDNS.begin(MDNS_NAME)) {
         MDNS.addService("http", "tcp", 80);

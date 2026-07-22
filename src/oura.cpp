@@ -43,7 +43,11 @@ static void resetBudgetIfNewDay() {
 }
 
 void ouraInit() {
-    prefs.begin("ringboard", false);
+    if (!prefs.begin("ringboard", false)) {
+        // Rotation persistence is load-bearing (Oura refresh tokens are
+        // single-use); a dead NVS must be loud, not silent.
+        Serial.println("[oura] NVS open FAILED - token rotation won't stick!");
+    }
     String stored = prefs.getString("rtok", "");
     if (stored.length() > 0) {
         snprintf(refreshToken, sizeof(refreshToken), "%s", stored.c_str());
@@ -120,9 +124,19 @@ static bool refreshAccessToken() {
         tokenExpiryMs = millis() + 30UL * 60UL * 1000UL;
     }
     if (rt[0] && strcmp(rt, refreshToken) != 0) {
-        snprintf(refreshToken, sizeof(refreshToken), "%s", rt);
-        prefs.putString("rtok", refreshToken);
-        Serial.println("[oura] rotated refresh token saved to NVS");
+        if (strlen(rt) >= sizeof(refreshToken)) {
+            Serial.println("[oura] rotated token too long - keeping old");
+        } else {
+            snprintf(refreshToken, sizeof(refreshToken), "%s", rt);
+            if (prefs.putString("rtok", refreshToken) == 0) {
+                // One retry; a failed persist after the old token was
+                // consumed strands the board on next reboot.
+                if (prefs.putString("rtok", refreshToken) == 0) {
+                    Serial.println("[oura] NVS token write FAILED twice!");
+                }
+            }
+            Serial.println("[oura] rotated refresh token saved to NVS");
+        }
     }
     authFailed = false;
     netFailed = false;
@@ -148,17 +162,25 @@ static bool ensureToken() {
 static bool dateRange(char *startD, size_t sn, char *endD, size_t en) {
     struct tm t;
     if (!getLocalTime(&t, 100)) return false;
-    time_t fwd = time(nullptr) + 86400;
-    localtime_r(&fwd, &t);
-    strftime(endD, en, "%Y-%m-%d", &t);
-    time_t back = time(nullptr) - (time_t)HIST_DAYS * 86400;
-    localtime_r(&back, &t);
-    strftime(startD, sn, "%Y-%m-%d", &t);
+    // Civil-date arithmetic (mktime normalizes; tm_isdst = -1 so DST
+    // transitions can't shift the date, unlike naive +/-86400 seconds).
+    struct tm fwd = t;
+    fwd.tm_mday += 1;
+    fwd.tm_isdst = -1;
+    mktime(&fwd);
+    strftime(endD, en, "%Y-%m-%d", &fwd);
+    struct tm back = t;
+    back.tm_mday -= HIST_DAYS;
+    back.tm_isdst = -1;
+    mktime(&back);
+    strftime(startD, sn, "%Y-%m-%d", &back);
     return true;
 }
 
 // "YYYY-MM-DD" -> whole days before today (0 = today), or -1 if unparseable.
-// Both sides anchored to noon so DST shifts can't skew the division.
+// Both sides anchored to noon with tm_isdst = -1 (mktime resolves the zone)
+// so DST can't skew the division — with isdst=0 every PDT date came out an
+// hour early and "today" landed at -1.
 static int daysAgo(const char *day) {
     int y, m, d;
     if (sscanf(day, "%d-%d-%d", &y, &m, &d) != 3) return -1;
@@ -167,15 +189,18 @@ static int daysAgo(const char *day) {
     t.tm_mon = m - 1;
     t.tm_mday = d;
     t.tm_hour = 12;
+    t.tm_isdst = -1;
     time_t then = mktime(&t);
     struct tm nowTm;
     if (then == (time_t)-1 || !getLocalTime(&nowTm, 50)) return -1;
     nowTm.tm_hour = 12;
     nowTm.tm_min = 0;
     nowTm.tm_sec = 0;
+    nowTm.tm_isdst = -1;
     time_t noonToday = mktime(&nowTm);
     long diff = (long)(noonToday - then);
-    if (diff < 0) return -1;
+    if (diff < -43200) return -1;  // genuinely a future date
+    if (diff < 0) diff = 0;
     return (int)((diff + 43200) / 86400);
 }
 
@@ -260,6 +285,8 @@ static const ContribMap kSleepMap[] = {
     {"latency", FOCUS_WINDDOWN, "Falling asleep is taking a while"},
     {"restfulness", FOCUS_WINDDOWN, "Restfulness is low"},
     {"timing", FOCUS_WINDDOWN, "Sleep timing is drifting"},
+    {"deep_sleep", FOCUS_WINDDOWN, "Deep sleep ran low"},
+    {"rem_sleep", FOCUS_WINDDOWN, "REM sleep ran low"},
 };
 static const int kNReadiness = sizeof(kReadinessMap) / sizeof(kReadinessMap[0]);
 static const int kNSleep = sizeof(kSleepMap) / sizeof(kSleepMap[0]);
@@ -336,6 +363,11 @@ static bool fetchSleepDetail(const char *startD, const char *endD,
     JsonDocument doc;
     if (!ouraGet("sleep", startD, endD, filter, &doc)) return false;
 
+    // The fetch succeeded, so rebuild the accumulated history from scratch
+    // (the caller may pass in last cycle's data for merge-on-failure).
+    memset(out->histSec, 0, sizeof(out->histSec));
+    out->haveHist = false;
+
     // Newest day wins; on a tie prefer long_sleep over an unscored "sleep"
     // period, then the longest. Naps ("late_nap", "rest") never qualify.
     // The same pass accumulates per-night totals (naps included, "rest"
@@ -373,18 +405,7 @@ static bool fetchSleepDetail(const char *startD, const char *endD,
         }
     }
 
-    // Debt: run oldest to newest, surplus pays existing debt down but never
-    // banks ahead, so the total floors at zero after every night with data.
-    int32_t debt = 0;
-    int nights = 0;
-    for (int i = 0; i < HIST_DAYS; i++) {
-        if (out->histSec[i] <= 0) continue;
-        nights++;
-        debt += SLEEP_NEED_SEC - out->histSec[i];
-        if (debt < 0) debt = 0;
-    }
-    out->sleepDebtSec = debt;
-    out->histNights = nights;
+    ouraRecomputeDebt(out);
 
     if (bestTotal < 0) return false;
     out->sleepAgoDays = daysAgo(bestDay);
@@ -441,12 +462,36 @@ static bool fetchActivity(const char *startD, const char *endD,
     return true;
 }
 
+// Runtime sleep need (#4 config): debt must follow /api/config, not the
+// compile-time default.
+static int32_t needSecRt = SLEEP_NEED_SEC;
+void ouraSetNeedSec(int32_t sec) {
+    if (sec >= 4L * 3600L && sec <= 12L * 3600L) needSecRt = sec;
+}
+
+// Debt: run oldest to newest, surplus pays existing debt down but never
+// banks ahead, so the total floors at zero after every night with data.
+// Exported so a config change can recompute without a refetch.
+void ouraRecomputeDebt(OuraData *d) {
+    int32_t debt = 0;
+    int nights = 0;
+    for (int i = 0; i < HIST_DAYS; i++) {
+        if (d->histSec[i] <= 0) continue;
+        nights++;
+        debt += needSecRt - d->histSec[i];
+        if (debt < 0) debt = 0;
+    }
+    d->sleepDebtSec = debt;
+    d->histNights = nights;
+}
+
 // ---- Slow endpoints: cached inside this module on their own cadence -------
 // daily_stress at most hourly, sleep_time at most every 12h, so neither
-// inflates the per-refresh call count.
+// inflates the per-refresh call count. The source day is kept as a string
+// and re-aged on every export so midnight can't freeze "today".
 static struct {
     bool have = false;
-    int agoDays = -1;
+    char day[11] = "";
     int32_t stressHigh = -1, recoveryHigh = -1;
     uint32_t fetchedAt = 0;
 } stressCache;
@@ -481,9 +526,12 @@ static void maybeFetchStress(const char *startD, const char *endD) {
             found = true;
         }
     }
-    if (!found) return;
+    if (!found) {
+        stressCache.have = false;  // successful-but-empty clears old data
+        return;
+    }
     stressCache.have = true;
-    stressCache.agoDays = daysAgo(bestDay);
+    snprintf(stressCache.day, sizeof(stressCache.day), "%s", bestDay);
     stressCache.stressHigh = best["stress_high"] | -1;
     stressCache.recoveryHigh = best["recovery_high"] | -1;
 }
@@ -565,23 +613,39 @@ bool ouraFetchAll(OuraData *out) {
     }
     if (!ensureToken()) return false;
 
+    // Merge-on-failure: the caller passes in the previous cycle's data.
+    // Fetchers only mutate their section after a successful response, so a
+    // metric whose fetch fails this round simply keeps last round's values
+    // (its have-flag stays set; per-metric ago-days convey real staleness).
     ContribVals rv, sv;
     rv.clear();
     sv.clear();
-    out->haveReadiness = fetchScore(
-        "daily_readiness", startD, endD, &out->readinessScore,
-        &out->readinessAgoDays, out->readinessHist, kReadinessMap,
-        kNReadiness, &rv);
-    out->haveSleep = fetchScore("daily_sleep", startD, endD, &out->sleepScore,
-                                &out->sleepScoreAgoDays, out->sleepScoreHist,
-                                kSleepMap, kNSleep, &sv);
-    out->haveSleepDetail = fetchSleepDetail(startD, endD, out);
-    out->haveActivity = fetchActivity(startD, endD, out);
-    deriveFocus(out, rv, out->haveReadiness, sv, out->haveSleep);
+    bool okR = fetchScore("daily_readiness", startD, endD,
+                          &out->readinessScore, &out->readinessAgoDays,
+                          out->readinessHist, kReadinessMap, kNReadiness, &rv);
+    bool okS = fetchScore("daily_sleep", startD, endD, &out->sleepScore,
+                          &out->sleepScoreAgoDays, out->sleepScoreHist,
+                          kSleepMap, kNSleep, &sv);
+    bool okD = fetchSleepDetail(startD, endD, out);
+    bool okA = fetchActivity(startD, endD, out);
+    out->haveReadiness = okR || out->haveReadiness;
+    out->haveSleep = okS || out->haveSleep;
+    out->haveSleepDetail = okD || out->haveSleepDetail;
+    out->haveActivity = okA || out->haveActivity;
+
+    // Focus only ever derives from documents fetched this cycle that are
+    // actually current (before FRESH_AFTER_HOUR yesterday's night still
+    // counts); otherwise last cycle's focus stands.
+    struct tm nowT;
+    bool haveClock = getLocalTime(&nowT, 10);
+    bool early = haveClock && nowT.tm_hour < FRESH_AFTER_HOUR;
+    bool freshR = okR && (early || out->readinessAgoDays == 0);
+    bool freshS = okS && (early || out->sleepScoreAgoDays == 0);
+    if (freshR || freshS) deriveFocus(out, rv, freshR, sv, freshS);
 
     maybeFetchStress(startD, endD);
     out->haveStress = stressCache.have;
-    out->stressAgoDays = stressCache.agoDays;
+    out->stressAgoDays = stressCache.have ? daysAgo(stressCache.day) : -1;
     out->stressHighSec = stressCache.stressHigh;
     out->recoveryHighSec = stressCache.recoveryHigh;
 
@@ -590,8 +654,7 @@ bool ouraFetchAll(OuraData *out) {
     out->bedtimeStartSec = bedtimeCache.startSec;
     out->bedtimeEndSec = bedtimeCache.endSec;
 
-    bool any = out->haveReadiness || out->haveSleep || out->haveSleepDetail ||
-               out->haveActivity;
+    bool any = okR || okS || okD || okA;
     if (any) netFailed = false;
     return any;
 }

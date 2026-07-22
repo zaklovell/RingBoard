@@ -2,9 +2,13 @@
 #include "models.h"
 
 void ouraInit();
-// Fetches readiness, sleep score, sleep phases, and activity. Returns true if
-// at least one section came back; flags inside `out` say which.
+// Fetches readiness, sleep score, sleep phases, and activity. Pass in the
+// PREVIOUS cycle's data: sections whose fetch fails keep their old values
+// (merge-on-failure). Returns true if at least one section came back fresh.
 bool ouraFetchAll(OuraData *out);
+// Runtime sleep-need for the debt calculation (config #4).
+void ouraSetNeedSec(int32_t sec);
+void ouraRecomputeDebt(OuraData *d);
 int ouraCallsToday();
 // Human-readable evidence line for OuraData.focusReason.
 const char *focusReasonText(uint8_t idx);
