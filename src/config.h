@@ -30,6 +30,11 @@ constexpr int32_t SLEEP_NEED_SEC = 8L * 3600L;
 constexpr int TOUCH_IRQ_PIN = 36;
 constexpr uint32_t PAGE2_RETURN_MS = 30UL * 1000UL;
 
+// After this hour (local), sleep/readiness data must be filed under TODAY
+// to count as fresh; anything older is yesterday's night still on screen
+// (ring not synced yet) and greys out as "waiting" instead.
+constexpr int FRESH_AFTER_HOUR = 3;
+
 // Screen schedule (local time): off from midnight to 7am. Home Assistant
 // overrides win over this.
 constexpr int SLEEP_START_HOUR = 0;

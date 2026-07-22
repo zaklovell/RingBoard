@@ -320,6 +320,7 @@ static bool fetchSleepDetail(const char *startD, const char *endD,
     out->sleepDebtSec = debt;
 
     if (bestTotal < 0) return false;
+    out->sleepAgoDays = daysAgo(bestDay);
     out->totalSleepSec = bestTotal;
     out->deepSec = best["deep_sleep_duration"] | 0;
     out->remSec = best["rem_sleep_duration"] | 0;

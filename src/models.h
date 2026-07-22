@@ -32,6 +32,11 @@ struct OuraData {
     int totalCal = 0;
     int32_t sedentarySec = 0;
 
+    // Days-ago of the newest long-sleep document (0 = filed under today,
+    // 1 = yesterday, -1 = unknown). Oura files a night under its wake day,
+    // so a morning where this isn't 0 means the ring hasn't synced yet.
+    int sleepAgoDays = -1;
+
     // Per-night total sleep, oldest first; [HIST_DAYS-1] = last night
     // (Oura files a sleep period under the day you woke up). <=0 = no data.
     bool haveHist = false;

@@ -9,6 +9,7 @@
 #include "config.h"
 #include <stdio.h>
 #include <string.h>
+#include <time.h>
 
 static TFT_eSPI *tft;
 static TFT_eSprite *spr;
@@ -131,11 +132,24 @@ static void drawRing(int cx, const char *label, bool have, int score) {
     spr->drawString(label, cx, 64);
 }
 
+// After FRESH_AFTER_HOUR local, a night filed under a previous day is
+// yesterday's leftovers (the ring hasn't synced today yet) — grey it out
+// rather than presenting it as last night. Evaluated at render time so the
+// flip happens at the hour boundary, not only when a fetch changes data.
+static bool sleepStale(const OuraData &d) {
+    if (d.sleepAgoDays < 0) return false;  // no data: the "--" paths handle it
+    struct tm t;
+    if (!getLocalTime(&t, 10)) return false;  // clock unset: show what we have
+    if (t.tm_hour < FRESH_AFTER_HOUR) return false;
+    return d.sleepAgoDays != 0;
+}
+
 static void drawBandA(const BoardView &v) {
     bandStart();
     statusDot(v.status);
-    drawRing(64, "READINESS", v.d.haveReadiness, v.d.readinessScore);
-    drawRing(160, "SLEEP", v.d.haveSleep, v.d.sleepScore);
+    bool stale = sleepStale(v.d);
+    drawRing(64, "READINESS", v.d.haveReadiness && !stale, v.d.readinessScore);
+    drawRing(160, "SLEEP", v.d.haveSleep && !stale, v.d.sleepScore);
     drawRing(256, "ACTIVITY", v.d.haveActivity && v.d.activityScore > 0,
              v.d.activityScore);
     bandPush(0);
@@ -188,7 +202,7 @@ static void drawBandB(const BoardView &v) {
     spr->setTextFont(2);
     spr->setTextColor(COL_SUB, COL_BG);
     spr->drawString("TOTAL SLEEP", 18, 2);
-    if (v.d.haveSleepDetail) {
+    if (v.d.haveSleepDetail && !sleepStale(v.d)) {
         char total[16];
         fmtHoursMin(v.d.totalSleepSec, total, sizeof(total));
         spr->setTextDatum(ML_DATUM);
@@ -200,7 +214,9 @@ static void drawBandB(const BoardView &v) {
         spr->setTextDatum(ML_DATUM);
         spr->setFreeFont(&FreeSans12pt7b);
         spr->setTextColor(COL_SUB, COL_BG);
-        spr->drawString("No sleep data yet", 18, 40);
+        spr->drawString(v.d.haveSleepDetail ? "Waiting for last night's sync"
+                                            : "No sleep data yet",
+                        18, 40);
     }
     bandPush(80);
 }
