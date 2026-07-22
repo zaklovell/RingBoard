@@ -236,25 +236,87 @@ static bool ouraGet(const char *endpoint, const char *startD, const char *endD,
     return true;
 }
 
-// Pick the newest day explicitly; array order isn't documented.
+// ---- Today's Focus: contributor -> cue mapping ----------------------------
+// Each watched contributor maps to one conservative cue; the lowest
+// contributor across the newest readiness + sleep documents wins.
+struct ContribMap {
+    const char *key;
+    uint8_t cue;
+    const char *reason;
+};
+static const ContribMap kReadinessMap[] = {
+    {"sleep_balance", FOCUS_BEDTIME, "Sleep balance is your lowest factor"},
+    {"previous_night", FOCUS_BEDTIME, "Last night ran short"},
+    {"hrv_balance", FOCUS_EASY, "HRV balance is below your norm"},
+    {"resting_heart_rate", FOCUS_EASY, "Resting heart rate is elevated"},
+    {"recovery_index", FOCUS_EASY, "Recovery index is lagging"},
+    {"body_temperature", FOCUS_EASY, "Body temperature is off baseline"},
+    {"activity_balance", FOCUS_MOVE, "Activity balance is trailing"},
+    {"previous_day_activity", FOCUS_MOVE, "Yesterday was a light day"},
+};
+static const ContribMap kSleepMap[] = {
+    {"total_sleep", FOCUS_BEDTIME, "Total sleep is your lowest factor"},
+    {"efficiency", FOCUS_WINDDOWN, "Sleep efficiency is low"},
+    {"latency", FOCUS_WINDDOWN, "Falling asleep is taking a while"},
+    {"restfulness", FOCUS_WINDDOWN, "Restfulness is low"},
+    {"timing", FOCUS_WINDDOWN, "Sleep timing is drifting"},
+};
+static const int kNReadiness = sizeof(kReadinessMap) / sizeof(kReadinessMap[0]);
+static const int kNSleep = sizeof(kSleepMap) / sizeof(kSleepMap[0]);
+
+const char *focusReasonText(uint8_t idx) {
+    if (idx < kNReadiness) return kReadinessMap[idx].reason;
+    if (idx < kNReadiness + kNSleep) return kSleepMap[idx - kNReadiness].reason;
+    return "";
+}
+
+// Newest-day contributor values, parallel to the map tables; -1 = absent.
+struct ContribVals {
+    int8_t v[8];
+    void clear() { for (int8_t &x : v) x = -1; }
+};
+
+// Pick the newest day explicitly (array order isn't documented), fill the
+// per-day history for trend averages, and capture the newest document's
+// contributors for the Focus cue.
 static bool fetchScore(const char *endpoint, const char *startD,
-                       const char *endD, int *score) {
+                       const char *endD, int *score, int *agoDays,
+                       int8_t hist[HIST_DAYS], const ContribMap *cmap,
+                       int nmap, ContribVals *cv) {
     JsonDocument filter;
     filter["data"][0]["score"] = true;
     filter["data"][0]["day"] = true;
+    if (cmap) filter["data"][0]["contributors"] = true;
     JsonDocument doc;
     if (!ouraGet(endpoint, startD, endD, filter, &doc)) return false;
     const char *bestDay = "";
     int best = 0;
+    JsonObject bestObj;
     for (JsonObject o : doc["data"].as<JsonArray>()) {
         const char *day = o["day"] | "";
-        if (day[0] && strcmp(day, bestDay) >= 0) {
+        if (!day[0]) continue;
+        int ago = daysAgo(day);
+        int s = o["score"] | 0;
+        if (hist && ago >= 0 && ago < HIST_DAYS && s > 0) {
+            hist[HIST_DAYS - 1 - ago] = (int8_t)s;
+        }
+        if (strcmp(day, bestDay) >= 0) {
             bestDay = day;
-            best = o["score"] | 0;
+            best = s;
+            bestObj = o;
         }
     }
+    if (best <= 0) return false;
     *score = best;
-    return best > 0;
+    if (agoDays) *agoDays = daysAgo(bestDay);
+    if (cmap && cv) {
+        cv->clear();
+        JsonObject c = bestObj["contributors"];
+        for (int i = 0; i < nmap && i < 8; i++) {
+            cv->v[i] = (int8_t)(c[cmap[i].key] | -1);
+        }
+    }
+    return true;
 }
 
 // Long-sleep document with the biggest total wins; naps lose.
@@ -269,6 +331,8 @@ static bool fetchSleepDetail(const char *startD, const char *endD,
     f["rem_sleep_duration"] = true;
     f["light_sleep_duration"] = true;
     f["awake_time"] = true;
+    f["average_hrv"] = true;
+    f["lowest_heart_rate"] = true;
     JsonDocument doc;
     if (!ouraGet("sleep", startD, endD, filter, &doc)) return false;
 
@@ -312,12 +376,15 @@ static bool fetchSleepDetail(const char *startD, const char *endD,
     // Debt: run oldest to newest, surplus pays existing debt down but never
     // banks ahead, so the total floors at zero after every night with data.
     int32_t debt = 0;
+    int nights = 0;
     for (int i = 0; i < HIST_DAYS; i++) {
         if (out->histSec[i] <= 0) continue;
+        nights++;
         debt += SLEEP_NEED_SEC - out->histSec[i];
         if (debt < 0) debt = 0;
     }
     out->sleepDebtSec = debt;
+    out->histNights = nights;
 
     if (bestTotal < 0) return false;
     out->sleepAgoDays = daysAgo(bestDay);
@@ -326,6 +393,8 @@ static bool fetchSleepDetail(const char *startD, const char *endD,
     out->remSec = best["rem_sleep_duration"] | 0;
     out->lightSec = best["light_sleep_duration"] | 0;
     out->awakeSec = best["awake_time"] | 0;
+    out->avgHrv = (int)(best["average_hrv"] | 0.0f);
+    out->lowestHr = (int)(best["lowest_heart_rate"] | 0.0f);
     return true;
 }
 
@@ -339,9 +408,68 @@ static bool fetchActivity(const char *startD, const char *endD,
     f["equivalent_walking_distance"] = true;
     f["active_calories"] = true;
     f["total_calories"] = true;
+    f["target_calories"] = true;
     f["sedentary_time"] = true;
     JsonDocument doc;
     if (!ouraGet("daily_activity", startD, endD, filter, &doc)) return false;
+    const char *bestDay = "";
+    JsonObject best;
+    bool found = false;
+    for (JsonObject o : doc["data"].as<JsonArray>()) {
+        const char *day = o["day"] | "";
+        if (!day[0]) continue;
+        int ago = daysAgo(day);
+        int s = o["score"] | 0;
+        if (ago >= 0 && ago < HIST_DAYS && s > 0) {
+            out->activityHist[HIST_DAYS - 1 - ago] = (int8_t)s;
+        }
+        if (strcmp(day, bestDay) >= 0) {
+            bestDay = day;
+            best = o;
+            found = true;
+        }
+    }
+    if (!found) return false;
+    out->activityAgoDays = daysAgo(bestDay);
+    out->activityScore = best["score"] | 0;
+    out->steps = best["steps"] | 0;
+    out->distanceM = best["equivalent_walking_distance"] | 0;
+    out->activeCal = best["active_calories"] | 0;
+    out->totalCal = best["total_calories"] | 0;
+    out->targetCal = best["target_calories"] | 0;
+    out->sedentarySec = best["sedentary_time"] | 0;
+    return true;
+}
+
+// ---- Slow endpoints: cached inside this module on their own cadence -------
+// daily_stress at most hourly, sleep_time at most every 12h, so neither
+// inflates the per-refresh call count.
+static struct {
+    bool have = false;
+    int agoDays = -1;
+    int32_t stressHigh = -1, recoveryHigh = -1;
+    uint32_t fetchedAt = 0;
+} stressCache;
+
+static struct {
+    bool have = false;
+    int32_t startSec = 0, endSec = 0;
+    uint32_t fetchedAt = 0;
+} bedtimeCache;
+
+static void maybeFetchStress(const char *startD, const char *endD) {
+    if (stressCache.fetchedAt != 0 &&
+        millis() - stressCache.fetchedAt < STRESS_EVERY_MS) {
+        return;
+    }
+    stressCache.fetchedAt = millis();  // even on failure: no hammering
+    JsonDocument filter;
+    JsonObject f = filter["data"][0].to<JsonObject>();
+    f["day"] = true;
+    f["stress_high"] = true;
+    f["recovery_high"] = true;
+    JsonDocument doc;
+    if (!ouraGet("daily_stress", startD, endD, filter, &doc)) return;
     const char *bestDay = "";
     JsonObject best;
     bool found = false;
@@ -353,14 +481,80 @@ static bool fetchActivity(const char *startD, const char *endD,
             found = true;
         }
     }
-    if (!found) return false;
-    out->activityScore = best["score"] | 0;
-    out->steps = best["steps"] | 0;
-    out->distanceM = best["equivalent_walking_distance"] | 0;
-    out->activeCal = best["active_calories"] | 0;
-    out->totalCal = best["total_calories"] | 0;
-    out->sedentarySec = best["sedentary_time"] | 0;
-    return true;
+    if (!found) return;
+    stressCache.have = true;
+    stressCache.agoDays = daysAgo(bestDay);
+    stressCache.stressHigh = best["stress_high"] | -1;
+    stressCache.recoveryHigh = best["recovery_high"] | -1;
+}
+
+static void maybeFetchBedtime(const char *startD, const char *endD) {
+    if (bedtimeCache.fetchedAt != 0 &&
+        millis() - bedtimeCache.fetchedAt < BEDTIME_EVERY_MS) {
+        return;
+    }
+    bedtimeCache.fetchedAt = millis();
+    JsonDocument filter;
+    JsonObject f = filter["data"][0].to<JsonObject>();
+    f["day"] = true;
+    f["optimal_bedtime"]["start_offset"] = true;
+    f["optimal_bedtime"]["end_offset"] = true;
+    JsonDocument doc;
+    if (!ouraGet("sleep_time", startD, endD, filter, &doc)) return;
+    const char *bestDay = "";
+    JsonObject best;
+    bool found = false;
+    for (JsonObject o : doc["data"].as<JsonArray>()) {
+        const char *day = o["day"] | "";
+        if (day[0] && strcmp(day, bestDay) >= 0 &&
+            !o["optimal_bedtime"].isNull()) {
+            bestDay = day;
+            best = o;
+            found = true;
+        }
+    }
+    // Guidance is often simply absent (needs history/eligibility) — that's
+    // fine, the debt page falls back to the configured wake-time arithmetic.
+    if (!found) return;
+    bedtimeCache.have = true;
+    bedtimeCache.startSec = best["optimal_bedtime"]["start_offset"] | 0;
+    bedtimeCache.endSec = best["optimal_bedtime"]["end_offset"] | 0;
+}
+
+// Lowest contributor across both newest documents drives the Focus cue.
+// Anything >= 80 is healthy — then there's nothing to fix and the Focus
+// page gets to say so.
+static void deriveFocus(OuraData *out, const ContribVals &rv, bool haveR,
+                        const ContribVals &sv, bool haveS) {
+    int minVal = 127;
+    int cue = FOCUS_NONE, reason = 0;
+    if (haveR) {
+        for (int i = 0; i < kNReadiness && i < 8; i++) {
+            if (rv.v[i] >= 0 && rv.v[i] < minVal) {
+                minVal = rv.v[i];
+                cue = kReadinessMap[i].cue;
+                reason = i;
+            }
+        }
+    }
+    if (haveS) {
+        for (int i = 0; i < kNSleep && i < 8; i++) {
+            if (sv.v[i] >= 0 && sv.v[i] < minVal) {
+                minVal = sv.v[i];
+                cue = kSleepMap[i].cue;
+                reason = kNReadiness + i;
+            }
+        }
+    }
+    if (minVal >= 80 || minVal == 127) {
+        out->focusCue = FOCUS_NONE;
+        out->focusReason = 0;
+        out->focusValue = minVal == 127 ? 0 : minVal;
+        return;
+    }
+    out->focusCue = (uint8_t)cue;
+    out->focusReason = (uint8_t)reason;
+    out->focusValue = minVal;
 }
 
 bool ouraFetchAll(OuraData *out) {
@@ -371,11 +565,30 @@ bool ouraFetchAll(OuraData *out) {
     }
     if (!ensureToken()) return false;
 
-    out->haveReadiness =
-        fetchScore("daily_readiness", startD, endD, &out->readinessScore);
-    out->haveSleep = fetchScore("daily_sleep", startD, endD, &out->sleepScore);
+    ContribVals rv, sv;
+    rv.clear();
+    sv.clear();
+    out->haveReadiness = fetchScore(
+        "daily_readiness", startD, endD, &out->readinessScore,
+        &out->readinessAgoDays, out->readinessHist, kReadinessMap,
+        kNReadiness, &rv);
+    out->haveSleep = fetchScore("daily_sleep", startD, endD, &out->sleepScore,
+                                &out->sleepScoreAgoDays, out->sleepScoreHist,
+                                kSleepMap, kNSleep, &sv);
     out->haveSleepDetail = fetchSleepDetail(startD, endD, out);
     out->haveActivity = fetchActivity(startD, endD, out);
+    deriveFocus(out, rv, out->haveReadiness, sv, out->haveSleep);
+
+    maybeFetchStress(startD, endD);
+    out->haveStress = stressCache.have;
+    out->stressAgoDays = stressCache.agoDays;
+    out->stressHighSec = stressCache.stressHigh;
+    out->recoveryHighSec = stressCache.recoveryHigh;
+
+    maybeFetchBedtime(startD, endD);
+    out->haveBedtime = bedtimeCache.have;
+    out->bedtimeStartSec = bedtimeCache.startSec;
+    out->bedtimeEndSec = bedtimeCache.endSec;
 
     bool any = out->haveReadiness || out->haveSleep || out->haveSleepDetail ||
                out->haveActivity;

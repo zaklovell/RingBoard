@@ -11,29 +11,46 @@
 #define OURA_TOKEN_URL "https://api.ouraring.com/oauth/token"
 #define USER_AGENT "ringboard-esp32/0.1"
 
-// Oura data barely changes minute to minute; 10 minutes is plenty.
+// Oura data barely changes minute to minute; 10 minutes is plenty while the
+// screen is on. Screen off, drop to 30 so Home Assistant stays fresh
+// overnight without torching the call budget (4-5 calls per refresh).
 constexpr uint32_t REFRESH_MS = 10UL * 60UL * 1000UL;
+constexpr uint32_t REFRESH_OFF_MS = 30UL * 60UL * 1000UL;
 constexpr uint32_t FETCH_RETRY_MS = 20UL * 1000UL;  // after a failed fetch
-constexpr int OURA_DAILY_BUDGET = 600;  // max API calls per day (4 per refresh)
+constexpr int OURA_DAILY_BUDGET = 600;  // max API calls per day
 constexpr uint32_t STALE_AFTER_MS = 30UL * 60UL * 1000UL;
 constexpr uint32_t ERROR_AFTER_MS = 90UL * 60UL * 1000UL;
+
+// Slow endpoints ride their own cadence inside oura.cpp: daily_stress at
+// most hourly, sleep_time (bedtime guidance) at most every 12h.
+constexpr uint32_t STRESS_EVERY_MS = 60UL * 60UL * 1000UL;
+constexpr uint32_t BEDTIME_EVERY_MS = 12UL * 3600UL * 1000UL;
 
 // Refresh the access token this long before it actually expires.
 constexpr uint32_t TOKEN_SLACK_SEC = 600;
 
 // Sleep-debt page: nightly need to compare against (the API doesn't expose
-// Oura's personalized Sleep Need, so this is a fixed target).
+// Oura's personalized Sleep Need, so this is RingBoard's own fixed target;
+// overridable at runtime via POST /api/config, persisted in NVS).
 constexpr int32_t SLEEP_NEED_SEC = 8L * 3600L;
-
-// A tap (XPT2046 T_IRQ read as plain GPIO) flips to the sleep-debt page;
-// fall back to the main page after this long.
-constexpr int TOUCH_IRQ_PIN = 36;
-constexpr uint32_t PAGE2_RETURN_MS = 30UL * 1000UL;
+// Default wake time for the "in bed by" plan line, minutes past midnight.
+constexpr int DEFAULT_WAKE_MIN = 7 * 60;
 
 // After this hour (local), sleep/readiness data must be filed under TODAY
 // to count as fresh; anything older is yesterday's night still on screen
 // (ring not synced yet) and greys out as "waiting" instead.
 constexpr int FRESH_AFTER_HOUR = 3;
+
+// A tap (XPT2046 T_IRQ read as plain GPIO) cycles pages; a long press
+// dismisses a cue banner (or drops a forced screen back to auto). With the
+// screen off, the first tap just wakes it for WAKE_TAP_MS.
+constexpr int TOUCH_IRQ_PIN = 36;
+constexpr uint32_t LONGPRESS_MS = 900;
+constexpr uint32_t PAGE2_RETURN_MS = 30UL * 1000UL;
+constexpr uint32_t WAKE_TAP_MS = 30UL * 1000UL;
+
+// HA cue banners auto-clear after this long if never dismissed.
+constexpr uint32_t CUE_AUTOCLEAR_MS = 20UL * 60UL * 1000UL;
 
 // Screen schedule (local time): off from midnight to 7am. Home Assistant
 // overrides win over this.
@@ -42,7 +59,11 @@ constexpr int SLEEP_END_HOUR = 7;
 #define TZ_SPEC "PST8PDT,M3.2.0,M11.1.0"
 #define MDNS_NAME "ringboard"
 
-// CYD onboard RGB LED (active LOW). Red doubles as the error indicator.
+// CYD onboard RGB LED (active LOW, very bright — PWM keeps it polite).
+// Glance vocabulary: blue pulse = waiting for morning sync, amber = a cue
+// is waiting, green double-blink = activity goal met, red = errors only.
+// Dark whenever the screen is off (same quiet hours).
 constexpr int LED_R_PIN = 4;
 constexpr int LED_G_PIN = 16;
 constexpr int LED_B_PIN = 17;
+constexpr int LED_DUTY = 25;  // of 255: low-duty so it reads, not glares
