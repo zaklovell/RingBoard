@@ -52,10 +52,11 @@ constexpr uint32_t WAKE_TAP_MS = 30UL * 1000UL;
 // HA cue banners auto-clear after this long if never dismissed.
 constexpr uint32_t CUE_AUTOCLEAR_MS = 20UL * 60UL * 1000UL;
 
-// Screen schedule (local time): off from midnight to 7am. Home Assistant
-// overrides win over this.
-constexpr int SLEEP_START_HOUR = 0;
-constexpr int SLEEP_END_HOUR = 7;
+// Screen schedule (local time): off 1am-8am, matching Zak's actual sleep
+// (in bed ~12:30-1, up 8:30-9 — screen wakes just before he does). Home
+// Assistant overrides win over this.
+constexpr int SLEEP_START_HOUR = 1;
+constexpr int SLEEP_END_HOUR = 8;
 #define TZ_SPEC "PST8PDT,M3.2.0,M11.1.0"
 #define MDNS_NAME "ringboard"
 
